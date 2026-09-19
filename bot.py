@@ -1,10 +1,13 @@
 import os
 import sqlite3
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, PreCheckoutQueryHandler, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    ContextTypes, PreCheckoutQueryHandler, filters
+)
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -15,227 +18,347 @@ DB_PATH = os.getenv("DATABASE_PATH", "bot.db")
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ru-notes-bot")
 
-COURSES = {
-    "BSC": "🎓 B.Sc.",
-    "BCOM": "📗 B.Com",
-    "MCOM": "📙 M.Com",
-    "MSC": "🔬 M.Sc",
-    "MA": "📕 M.A",
-    "BA": "📘 B.A",
-}
-STREAMS = {"PCM": "PCM", "PCB": "PCB"}
-SEMESTERS = {str(i): f"Semester {i}" for i in range(1, 7)}
+COURSES = {"BSC":"🎓 B.Sc.","BCOM":"📗 B.Com","MCOM":"📙 M.Com","MSC":"🔬 M.Sc","MA":"📕 M.A","BA":"📘 B.A"}
+STREAMS = {"PCM":"PCM","PCB":"PCB"}
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
 
 def db():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS users(
-        telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
-        created_at TEXT NOT NULL)""")
+        telegram_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, created_at TEXT NOT NULL)""")
     c.execute("""CREATE TABLE IF NOT EXISTS products(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, course TEXT NOT NULL,
-        stream TEXT DEFAULT '', semester TEXT NOT NULL, subject TEXT NOT NULL,
-        price INTEGER NOT NULL DEFAULT 0, file_id TEXT DEFAULT '',
-        active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, course TEXT NOT NULL, stream TEXT DEFAULT '',
+        semester INTEGER NOT NULL, subject TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0,
+        file_id TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
         UNIQUE(course,stream,semester,subject))""")
     c.execute("""CREATE TABLE IF NOT EXISTS orders(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL,
-        product_id INTEGER NOT NULL, payload TEXT NOT NULL, price INTEGER NOT NULL,
-        status TEXT NOT NULL, telegram_charge_id TEXT DEFAULT '',
-        created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
+        id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, product_id INTEGER NOT NULL,
+        payload TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL,
+        telegram_charge_id TEXT DEFAULT '', created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
     c.commit()
     return c
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-def menu():
+def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎓 B.Sc.", callback_data="course:BSC"),
-         InlineKeyboardButton("📗 B.Com", callback_data="course:BCOM")],
-        [InlineKeyboardButton("📙 M.Com", callback_data="course:MCOM"),
-         InlineKeyboardButton("🔬 M.Sc", callback_data="course:MSC")],
-        [InlineKeyboardButton("📕 M.A", callback_data="course:MA"),
-         InlineKeyboardButton("📘 B.A", callback_data="course:BA")],
-        [InlineKeyboardButton("🛒 My Purchases", callback_data="purchases")]
+        [InlineKeyboardButton("🎓 B.Sc.",callback_data="course:BSC"), InlineKeyboardButton("📗 B.Com",callback_data="course:BCOM")],
+        [InlineKeyboardButton("📙 M.Com",callback_data="course:MCOM"), InlineKeyboardButton("🔬 M.Sc",callback_data="course:MSC")],
+        [InlineKeyboardButton("📕 M.A",callback_data="course:MA"), InlineKeyboardButton("📘 B.A",callback_data="course:BA")],
+        [InlineKeyboardButton("🛒 My Purchases",callback_data="purchases")]
     ])
+
+def admin_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Users",callback_data="adm:users"), InlineKeyboardButton("📚 Products / Notes",callback_data="adm:products")],
+        [InlineKeyboardButton("➕ Add Subject",callback_data="adm:add"), InlineKeyboardButton("📄 Upload PDF",callback_data="adm:upload")],
+        [InlineKeyboardButton("💰 Change Price",callback_data="adm:price"), InlineKeyboardButton("📦 Orders",callback_data="adm:orders")],
+        [InlineKeyboardButton("📊 Sales",callback_data="adm:sales"), InlineKeyboardButton("📢 Broadcast",callback_data="adm:broadcast")],
+        [InlineKeyboardButton("⚙️ Settings",callback_data="adm:settings")]
+    ])
+
+def admin_only(user_id):
+    return user_id == ADMIN_CHAT_ID
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     with db() as c:
-        c.execute("INSERT OR REPLACE INTO users(telegram_id,username,first_name,created_at) VALUES(?,?,?,COALESCE((SELECT created_at FROM users WHERE telegram_id=?),?))",
+        c.execute("""INSERT OR REPLACE INTO users(telegram_id,username,first_name,created_at)
+                     VALUES(?,?,?,COALESCE((SELECT created_at FROM users WHERE telegram_id=?),?))""",
                   (u.id,u.username or "",u.first_name or "",u.id,now()))
+    context.user_data.clear()
     await update.message.reply_text(
         "नमस्ते! 📚\nयहाँ आप अपने Course, Semester और Subject के अनुसार Notes/PDF खरीद सकते हैं।\nनीचे अपना Course चुनें।",
-        reply_markup=menu())
+        reply_markup=main_menu())
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_CHAT_ID:
+    if not admin_only(update.effective_user.id):
         await update.message.reply_text("यह command केवल Admin के लिए है।")
         return
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Users",callback_data="adm:users"),
-         InlineKeyboardButton("📚 Products / Notes",callback_data="adm:products")],
-        [InlineKeyboardButton("➕ Add Subject",callback_data="adm:add"),
-         InlineKeyboardButton("📄 Upload PDF",callback_data="adm:upload")],
-        [InlineKeyboardButton("💰 Change Price",callback_data="adm:price"),
-         InlineKeyboardButton("📦 Orders",callback_data="adm:orders")],
-        [InlineKeyboardButton("📊 Sales",callback_data="adm:sales"),
-         InlineKeyboardButton("📢 Broadcast",callback_data="adm:broadcast")],
-        [InlineKeyboardButton("⚙️ Settings",callback_data="adm:settings")]
-    ])
-    await update.message.reply_text("🔐 Admin Panel",reply_markup=kb)
+    context.user_data.clear()
+    await update.message.reply_text("🔐 Admin Panel",reply_markup=admin_menu())
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if admin_only(update.effective_user.id):
+        context.user_data.clear()
+        await update.message.reply_text("❌ प्रक्रिया रद्द कर दी गई।",reply_markup=admin_menu())
 
 async def choose_course(q, course):
     if course == "BSC":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("PCM",callback_data="stream:BSC:PCM"),
-             InlineKeyboardButton("PCB",callback_data="stream:BSC:PCB")],
+            [InlineKeyboardButton("PCM",callback_data="stream:BSC:PCM"),InlineKeyboardButton("PCB",callback_data="stream:BSC:PCB")],
             [InlineKeyboardButton("⬅️ Back",callback_data="home")]
         ])
         await q.edit_message_text("B.Sc. Stream चुनें:",reply_markup=kb)
     else:
-        await choose_semester(q, course, "")
+        await choose_semester(q,course,"")
 
 async def choose_semester(q, course, stream):
-    rows = []
-    for i in range(1,7):
-        rows.append([InlineKeyboardButton(f"Semester {i}",callback_data=f"sem:{course}:{stream}:{i}")])
-    rows.append([InlineKeyboardButton("⬅️ Back",callback_data=f"backcourse:{course}")])
+    rows = [[InlineKeyboardButton(f"Semester {i}",callback_data=f"sem:{course}:{stream}:{i}")] for i in range(1,7)]
+    rows.append([InlineKeyboardButton("⬅️ Back",callback_data="home")])
     await q.edit_message_text("Semester चुनें:",reply_markup=InlineKeyboardMarkup(rows))
 
 async def subjects(q, course, stream, sem):
     with db() as c:
-        rows = c.execute("SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1 ORDER BY subject",
-                         (course,stream,sem)).fetchall()
+        rows = c.execute("""SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1
+                            ORDER BY subject""",(course,stream,int(sem))).fetchall()
     if not rows:
-        text = "📚 इस Semester के Notes अभी उपलब्ध नहीं हैं।\nयदि आपको Notes चाहिए तो Admin से संपर्क करें।"
-        kb = [[InlineKeyboardButton("📩 Admin को Message करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")] if ADMIN_USERNAME else []]
+        text = "📚 इस Subject के Notes अभी उपलब्ध नहीं हैं।\nयदि आपको इस Subject के Notes चाहिए तो आप इस Admin ID पर message कर सकते हैं।"
+        kb = []
+        if ADMIN_USERNAME:
+            kb.append([InlineKeyboardButton("📩 Admin को Message करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")])
+        kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"course:{course}")])
     else:
         text = "📚 Subject चुनें:"
-        kb = [[InlineKeyboardButton(r["subject"],callback_data=f"prod:{r['id']}")] for r in rows]
-        kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"streamback:{course}:{stream}")])
+        kb = [[InlineKeyboardButton(r["subject"] + (" • PDF" if r["file_id"] else " • जल्द उपलब्ध"),callback_data=f"prod:{r['id']}")] for r in rows]
+        kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"course:{course}")])
     await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
 
-async def product(q, pid):
+async def show_product(q, pid):
     with db() as c:
         r = c.execute("SELECT * FROM products WHERE id=? AND active=1",(pid,)).fetchone()
     if not r:
         await q.answer("यह Notes उपलब्ध नहीं है।",show_alert=True); return
+    if not r["file_id"]:
+        text = "📚 इस Subject के Notes अभी उपलब्ध नहीं हैं।\nयदि आपको इस Subject के Notes चाहिए तो आप इस Admin ID पर message कर सकते हैं।"
+        kb = []
+        if ADMIN_USERNAME:
+            kb.append([InlineKeyboardButton("📩 Admin को Message करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")])
+        kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"sem:{r['course']}:{r['stream']}:{r['semester']}")])
+        await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb)); return
     stream = f" / {r['stream']}" if r["stream"] else ""
-    text = f"📚 {r['course']}{stream}\n📖 Semester {r['semester']}\n📝 {r['subject']}\n💰 Price: ⭐ {r['price']} Stars\n📄 PDF उपलब्ध"
-    kb = [[InlineKeyboardButton("💳 Buy Now",callback_data=f"buy:{pid}")],
-          [InlineKeyboardButton("📩 Admin से संपर्क करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")] if ADMIN_USERNAME else [],
-          [InlineKeyboardButton("⬅️ Back",callback_data=f"semback:{r['course']}:{r['stream']}:{r['semester']}")]]
-    await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup([x for x in kb if x]))
+    text = f"📚 {COURSES.get(r['course'],r['course'])}{stream}\n📖 Semester {r['semester']}\n📝 {r['subject']}\n💰 Price: ⭐ {r['price']} Stars\n📄 PDF available"
+    kb = [[InlineKeyboardButton("💳 Buy Now",callback_data=f"buy:{pid}")]]
+    if ADMIN_USERNAME:
+        kb.append([InlineKeyboardButton("📩 Admin से संपर्क करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")])
+    kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"sem:{r['course']}:{r['stream']}:{r['semester']}")])
+    await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
 
 async def buy(q, pid):
     with db() as c:
-        r = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
-        if not r:
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
+        if not p:
             await q.answer("PDF अभी उपलब्ध नहीं है।",show_alert=True); return
         payload = f"RU_NOTE:{q.from_user.id}:{pid}:{int(datetime.now().timestamp())}"
-        c.execute("INSERT INTO orders(telegram_id,product_id,payload,price,status,created_at) VALUES(?,?,?,?,?,?)",
-                  (q.from_user.id,pid,payload,r["price"],"PENDING",now()))
-        order_id = c.lastrowid
+        c.execute("""INSERT INTO orders(telegram_id,product_id,payload,price,status,created_at)
+                     VALUES(?,?,?,?,?,?)""",(q.from_user.id,pid,payload,p["price"],"PENDING",now()))
     await q.message.reply_invoice(
-        title=r["subject"][:32],
-        description=f"Rajasthan University Notes - {r['subject']}"[:255],
-        payload=payload,
-        currency="XTR",
-        prices=[LabeledPrice(r["subject"][:32], r["price"])],
-        provider_token="",
-        start_parameter=f"ru-note-{order_id}",
-    )
+        title=p["subject"][:32],
+        description=f"Rajasthan University Notes - {p['subject']}"[:255],
+        payload=payload, currency="XTR",
+        prices=[LabeledPrice(p["subject"][:32],p["price"])],
+        provider_token="", start_parameter=f"ru-note-{pid}")
 
 async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.pre_checkout_query
-    if not q.invoice_payload.startswith("RU_NOTE:"):
-        await q.answer(ok=False,error_message="Invalid payment.")
-        return
     with db() as c:
-        r = c.execute("SELECT id FROM orders WHERE payload=? AND telegram_id=? AND status='PENDING'",
-                      (q.invoice_payload,q.from_user.id)).fetchone()
-    await q.answer(ok=bool(r), error_message=None if r else "Order not found.")
+        row = c.execute("SELECT id FROM orders WHERE payload=? AND telegram_id=? AND status='PENDING'",
+                        (q.invoice_payload,q.from_user.id)).fetchone()
+    await q.answer(ok=bool(row),error_message=None if row else "Order not found.")
 
 async def successful(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sp = update.message.successful_payment
     with db() as c:
-        order = c.execute("SELECT * FROM orders WHERE payload=? AND telegram_id=?",
+        order = c.execute("SELECT * FROM orders WHERE payload=? AND telegram_id=? AND status='PENDING'",
                           (sp.invoice_payload,update.effective_user.id)).fetchone()
         if not order: return
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1",(order["product_id"],)).fetchone()
         c.execute("UPDATE orders SET status='PAID',telegram_charge_id=? WHERE id=?",
                   (sp.telegram_payment_charge_id,order["id"]))
-        p = c.execute("SELECT * FROM products WHERE id=?",(order["product_id"],)).fetchone()
-        if not p or not p["file_id"]: return
+        if not p or not p["file_id"]:
+            await update.message.reply_text("Payment सफल हुआ, लेकिन PDF अभी उपलब्ध नहीं है। Admin से संपर्क करें।")
+            return
         await update.message.reply_document(p["file_id"],caption=f"📚 {p['subject']}\nधन्यवाद! आपका PDF यहाँ है।")
         c.execute("UPDATE orders SET delivered=1 WHERE id=?",(order["id"],))
-        
+
+async def purchases(q):
+    with db() as c:
+        rows=c.execute("""SELECT o.id,p.subject,p.course,p.stream,p.semester,o.price,o.created_at
+                          FROM orders o JOIN products p ON p.id=o.product_id
+                          WHERE o.telegram_id=? AND o.status='PAID' AND o.delivered=1 ORDER BY o.id DESC""",
+                       (q.from_user.id,)).fetchall()
+    if not rows:
+        await q.edit_message_text("🛒 आपकी अभी कोई खरीदारी नहीं है।",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]])); return
+    kb=[]
+    text="🛒 आपकी Purchases:\n\n"
+    for r in rows[:20]:
+        text += f"📖 {r['subject']} — ⭐ {r['price']}\n"
+        kb.append([InlineKeyboardButton(f"📥 {r['subject']}",callback_data=f"download:{r['id']}")])
+    kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
+    await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
+
+async def admin_add_start(q, context):
+    context.user_data["admin_action"]="add_course"
+    await q.edit_message_text("➕ Add Subject\nCourse भेजें: BSC / BCOM / MCOM / MSC / MA / BA\n\n/cancel से रद्द करें।")
+
+async def admin_upload_start(q, context):
+    context.user_data["admin_action"]="upload_id"
+    await q.edit_message_text("📄 PDF Upload\nपहले Product ID भेजें, फिर उसी के बाद PDF Document भेजें।\n\n/cancel से रद्द करें।")
+
+async def admin_price_start(q, context):
+    context.user_data["admin_action"]="price"
+    await q.edit_message_text("💰 Product ID और नई price इस format में भेजें:\n123 50\n\n/cancel से रद्द करें।")
+
+async def admin_broadcast_start(q, context):
+    context.user_data["admin_action"]="broadcast"
+    await q.edit_message_text("📢 अगला message सभी registered users को भेजा जाएगा।\nText/photo/document भेज सकते हैं।\n/cancel से रद्द करें।")
+
+async def admin_text(update, context):
+    if update.effective_user.id != ADMIN_CHAT_ID: return
+    action=context.user_data.get("admin_action")
+    if not action: return
+    text=(update.message.text or "").strip()
+
+    if action=="add_course":
+        course=text.upper()
+        if course not in COURSES:
+            await update.message.reply_text("गलत Course. BSC/BCOM/MCOM/MSC/MA/BA भेजें।"); return
+        context.user_data.update(admin_action="add_stream",course=course)
+        await update.message.reply_text("Stream भेजें। केवल B.Sc. के लिए PCM या PCB; बाकी में NONE भेजें।")
+        return
+    if action=="add_stream":
+        stream=text.upper()
+        course=context.user_data["course"]
+        if course=="BSC" and stream not in STREAMS:
+            await update.message.reply_text("B.Sc. के लिए PCM या PCB भेजें।"); return
+        if course!="BSC": stream=""
+        context.user_data.update(admin_action="add_semester",stream=stream)
+        await update.message.reply_text("Semester 1 से 6 में कोई एक भेजें।")
+        return
+    if action=="add_semester":
+        if text not in [str(i) for i in range(1,7)]:
+            await update.message.reply_text("Semester 1 से 6 में कोई एक भेजें।"); return
+        context.user_data.update(admin_action="add_subject",semester=int(text))
+        await update.message.reply_text("Subject का नाम भेजें।")
+        return
+    if action=="add_subject":
+        context.user_data.update(admin_action="add_price",subject=text)
+        await update.message.reply_text("Price Stars में भेजें। उदाहरण: 50")
+        return
+    if action=="add_price":
+        try: price=int(text); assert price>0
+        except: await update.message.reply_text("Price केवल positive number में भेजें।"); return
+        d=context.user_data
+        with db() as c:
+            c.execute("""INSERT OR IGNORE INTO products(course,stream,semester,subject,price,file_id,active,created_at)
+                         VALUES(?,?,?,?,?,'',1,?)""",(d["course"],d["stream"],d["semester"],d["subject"],price,now()))
+        context.user_data.clear()
+        await update.message.reply_text("✅ Subject/Product add हो गया।\nअब PDF upload करने के लिए Admin Panel → Upload PDF चुनें।",reply_markup=admin_menu())
+        return
+    if action=="upload_id":
+        if not text.isdigit():
+            await update.message.reply_text("Product ID number भेजें।"); return
+        with db() as c:
+            p=c.execute("SELECT id,subject FROM products WHERE id=?",(int(text),)).fetchone()
+        if not p:
+            await update.message.reply_text("Product ID नहीं मिला।"); return
+        context.user_data.update(admin_action="upload_pdf",product_id=int(text))
+        await update.message.reply_text(f"अब Product #{text} ({p['subject']}) की PDF Document के रूप में भेजें।")
+        return
+    if action=="price":
+        parts=text.split()
+        if len(parts)!=2 or not all(x.isdigit() for x in parts):
+            await update.message.reply_text("Format: ProductID Price\nउदाहरण: 123 50"); return
+        pid,price=map(int,parts)
+        with db() as c: c.execute("UPDATE products SET price=? WHERE id=?",(price,pid))
+        context.user_data.clear()
+        await update.message.reply_text("✅ Price update हो गई।",reply_markup=admin_menu())
+        return
+    if action=="broadcast":
+        context.user_data.clear()
+        with db() as c: users=c.execute("SELECT telegram_id FROM users").fetchall()
+        sent=0
+        for u in users:
+            try:
+                await context.bot.copy_message(chat_id=u["telegram_id"],from_chat_id=ADMIN_CHAT_ID,message_id=update.message.message_id)
+                sent+=1
+            except Exception as e:
+                log.warning("broadcast %s: %s",u["telegram_id"],e)
+        await update.message.reply_text(f"📢 Broadcast complete. Sent: {sent}/{len(users)}",reply_markup=admin_menu())
+        return
+
+async def admin_document(update, context):
+    if update.effective_user.id != ADMIN_CHAT_ID: return
+    if context.user_data.get("admin_action")!="upload_pdf": return
+    pid=context.user_data.get("product_id")
+    if not update.message.document: return
+    if update.message.document.mime_type not in ("application/pdf","application/octet-stream") and not update.message.document.file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("कृपया PDF document भेजें।"); return
+    with db() as c: c.execute("UPDATE products SET file_id=? WHERE id=?",(update.message.document.file_id,pid))
+    context.user_data.clear()
+    await update.message.reply_text(f"✅ Product #{pid} की PDF upload हो गई।",reply_markup=admin_menu())
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
+    q=update.callback_query
     await q.answer()
-    d = q.data
-    if d == "home":
-        await q.edit_message_text("Course चुनें:",reply_markup=menu()); return
-    if d.startswith("course:"):
-        await choose_course(q,d.split(":")[1]); return
+    d=q.data
+    if d=="home": await q.edit_message_text("Course चुनें:",reply_markup=main_menu()); return
+    if d.startswith("course:"): await choose_course(q,d.split(":")[1]); return
     if d.startswith("stream:"):
         _,course,stream=d.split(":"); await choose_semester(q,course,stream); return
     if d.startswith("sem:"):
         _,course,stream,sem=d.split(":"); await subjects(q,course,stream,sem); return
-    if d.startswith("prod:"):
-        await product(q,int(d.split(":")[1])); return
-    if d.startswith("buy:"):
-        await buy(q,int(d.split(":")[1])); return
-    if d == "purchases":
+    if d.startswith("prod:"): await show_product(q,int(d.split(":")[1])); return
+    if d.startswith("buy:"): await buy(q,int(d.split(":")[1])); return
+    if d=="purchases": await purchases(q); return
+    if d.startswith("download:"):
+        oid=int(d.split(":")[1])
         with db() as c:
-            rows=c.execute("""SELECT p.subject,p.course,p.stream,p.semester,o.created_at
-                              FROM orders o JOIN products p ON p.id=o.product_id
-                              WHERE o.telegram_id=? AND o.status='PAID' AND o.delivered=1
-                              ORDER BY o.id DESC""",(q.from_user.id,)).fetchall()
-        if not rows:
-            await q.edit_message_text("🛒 आपकी अभी कोई खरीदारी नहीं है।",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]]))
-            return
-        text="🛒 आपकी Purchases:\n\n"
-        for r in rows[:20]:
-            text += f"📖 {r['subject']} — {r['course']} {r['stream']} Sem {r['semester']}\n"
-        await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]]))
+            r=c.execute("""SELECT p.file_id,p.subject FROM orders o JOIN products p ON p.id=o.product_id
+                           WHERE o.id=? AND o.telegram_id=? AND o.status='PAID' AND o.delivered=1""",
+                        (oid,q.from_user.id)).fetchone()
+        if not r: await q.answer("यह PDF आपकी purchase में नहीं है।",show_alert=True); return
+        await q.message.reply_document(r["file_id"],caption=f"📚 {r['subject']}")
         return
-    if d.startswith("adm:"):
-        if q.from_user.id != ADMIN_CHAT_ID: return
-        action=d.split(":")[1]
-        with db() as c:
-            if action=="users":
-                n=c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-                await q.edit_message_text(f"👤 Total Users: {n}")
-            elif action=="products":
-                n=c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-                await q.edit_message_text(f"📚 Total Products: {n}\n\nAdvanced product management UI अगला चरण है।")
-            elif action=="orders":
+    if d.startswith("adm:") and admin_only(q.from_user.id):
+        a=d.split(":")[1]
+        if a=="add": await admin_add_start(q,context); return
+        if a=="upload": await admin_upload_start(q,context); return
+        if a=="price": await admin_price_start(q,context); return
+        if a=="broadcast": await admin_broadcast_start(q,context); return
+        if a=="users":
+            with db() as c: n=c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            await q.edit_message_text(f"👤 Total Users: {n}",reply_markup=admin_menu()); return
+        if a=="products":
+            with db() as c:
+                rows=c.execute("SELECT id,course,stream,semester,subject,price,file_id,active FROM products ORDER BY id DESC LIMIT 50").fetchall()
+            text="📚 Products:\n\n" + ("\n".join(f"#{r['id']} {r['course']} {r['stream']} Sem{r['semester']} — {r['subject']} — ⭐{r['price']} — {'PDF' if r['file_id'] else 'NO PDF'}" for r in rows) or "No products")
+            await q.edit_message_text(text[:4000],reply_markup=admin_menu()); return
+        if a=="orders":
+            with db() as c:
                 rows=c.execute("SELECT status,COUNT(*) n FROM orders GROUP BY status").fetchall()
-                await q.edit_message_text("📦 Orders\n"+"\n".join(f"{r['status']}: {r['n']}" for r in rows) or "No orders")
-            elif action=="sales":
+                latest=c.execute("SELECT id,telegram_id,price,status,created_at FROM orders ORDER BY id DESC LIMIT 10").fetchall()
+            text="📦 Orders\n" + ("\n".join(f"{r['status']}: {r['n']}" for r in rows) or "No orders")
+            text+="\n\nRecent:\n"+"\n".join(f"#{r['id']} user {r['telegram_id']} ⭐{r['price']} {r['status']}" for r in latest)
+            await q.edit_message_text(text[:4000],reply_markup=admin_menu()); return
+        if a=="sales":
+            today=date.today().isoformat()
+            with db() as c:
                 total=c.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='PAID'").fetchone()[0]
-                await q.edit_message_text(f"📊 Total Sales: ⭐ {total}")
-            else:
-                await q.edit_message_text(f"⚙️ {action.title()} module तैयार किया जा रहा है।")
-        return
+                td=c.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='PAID' AND substr(created_at,1,10)=?",(today,)).fetchone()[0]
+                cnt=c.execute("SELECT COUNT(*) FROM orders WHERE status='PAID'").fetchone()[0]
+            await q.edit_message_text(f"📊 Sales\nPaid Orders: {cnt}\nTotal Sales: ⭐ {total}\nToday: ⭐ {td}",reply_markup=admin_menu()); return
+        if a=="settings":
+            await q.edit_message_text(f"⚙️ Settings\nAdmin ID: {ADMIN_CHAT_ID}\nAdmin Username: {ADMIN_USERNAME or 'not set'}\nDatabase: {DB_PATH}",reply_markup=admin_menu()); return
 
-async def error_handler(update, context):
-    log.exception("Unhandled error", exc_info=context.error)
+async def error_handler(update,context):
+    log.exception("Unhandled error",exc_info=context.error)
 
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing")
+    if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     db().close()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app=Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CommandHandler("admin",admin))
+    app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,successful))
+    app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,admin_text))
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
