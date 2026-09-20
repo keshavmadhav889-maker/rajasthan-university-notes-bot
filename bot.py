@@ -603,6 +603,50 @@ async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("🎓 Course चुनें:", reply_markup=main_menu())
 
+async def purchases_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with db() as c:
+        rows=c.execute("""SELECT o.id,p.subject,p.price
+                          FROM orders o JOIN products p ON p.id=o.product_id
+                          WHERE o.telegram_id=? AND o.status='PAID' AND o.delivered=1
+                          ORDER BY o.id DESC LIMIT 20""",(update.effective_user.id,)).fetchall()
+    if not rows:
+        await update.message.reply_text("🛒 आपकी अभी कोई खरीदारी नहीं है।", reply_markup=main_menu())
+        return
+    text="🛒 आपकी Purchases:\n\n" + "\n".join(f"📖 {r['subject']} — ⭐ {r['price']}" for r in rows)
+    await update.message.reply_text(text, reply_markup=main_menu())
+
+async def latest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with db() as c:
+        rows=c.execute("SELECT * FROM products WHERE active=1 AND file_id<>'' ORDER BY id DESC LIMIT 12").fetchall()
+    kb=[[InlineKeyboardButton(f"{r['subject']} • ⭐{r['price']}",callback_data=f"prod:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
+    await update.message.reply_text("🆕 Latest Notes" if rows else "🆕 अभी कोई Notes available नहीं हैं.",reply_markup=InlineKeyboardMarkup(kb))
+
+async def featured_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with db() as c:
+        rows=c.execute("""SELECT p.*,COUNT(o.id) sales FROM products p
+                          LEFT JOIN orders o ON o.product_id=p.id AND o.status='PAID'
+                          WHERE p.active=1 AND p.file_id<>'' GROUP BY p.id
+                          ORDER BY sales DESC,p.id DESC LIMIT 12""").fetchall()
+    kb=[[InlineKeyboardButton(f"⭐ {r['subject']} • {r['price']}",callback_data=f"prod:{r['id']}")] for r in rows]
+    kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
+    await update.message.reply_text("⭐ Featured Notes",reply_markup=InlineKeyboardMarkup(kb))
+
+async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb=[]
+    if ADMIN_USERNAME:
+        kb.append([InlineKeyboardButton("📩 Admin को Subject बताएं",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")])
+    kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
+    await update.message.reply_text("📩 जिस Subject के Notes चाहिए, Admin को Course + Semester + Subject भेजें.",reply_markup=InlineKeyboardMarkup(kb))
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ RU Notes Store — Help\n\n"
+        "Course → Semester → Subject चुनें।\n"
+        "Available PDF खोलें → Buy Now → Telegram Stars से payment करें।\n"
+        "Payment successful होने पर PDF Telegram में मिलेगा.",
+        reply_markup=main_menu())
+
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("menu", "🏠 Main Menu"),
@@ -622,6 +666,11 @@ def main():
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CommandHandler("menu",menu_command))
     app.add_handler(CommandHandler("courses",courses_command))
+    app.add_handler(CommandHandler("purchases",purchases_command))
+    app.add_handler(CommandHandler("latest",latest_command))
+    app.add_handler(CommandHandler("featured",featured_command))
+    app.add_handler(CommandHandler("request",request_command))
+    app.add_handler(CommandHandler("help",help_command))
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
