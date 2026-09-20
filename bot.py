@@ -10,7 +10,8 @@ from telegram.ext import (
 )
 
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN", "")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
 DB_PATH = os.getenv("DATABASE_PATH", "bot.db")
@@ -81,7 +82,8 @@ def main_menu():
         [InlineKeyboardButton("🆕 Latest Notes",callback_data="latest"), InlineKeyboardButton("⭐ Featured",callback_data="featured")],
         [InlineKeyboardButton("🔎 Search Notes",callback_data="search")],
         [InlineKeyboardButton("🛒 My Purchases",callback_data="purchases")],
-        [InlineKeyboardButton("📩 Request Notes",callback_data="request")]
+        [InlineKeyboardButton("📩 Request Notes",callback_data="request")],
+        [InlineKeyboardButton("📢 Join Channel",callback_data="channel"), InlineKeyboardButton("❓ Help",callback_data="help")]
     ])
 
 def admin_menu():
@@ -333,6 +335,8 @@ async def admin_text(update, context):
         except: await update.message.reply_text("Price केवल positive number में भेजें।"); return
         d=context.user_data
         with db() as c:
+            c.execute("""INSERT OR IGNORE INTO subject_catalog(course,stream,semester,subject,active) VALUES(?,?,?,?,1)""",
+                      (d["course"],d["stream"],d["semester"],d["subject"]))
             c.execute("""INSERT OR IGNORE INTO products(course,stream,semester,subject,price,file_id,active,created_at)
                          VALUES(?,?,?,?,?,'',1,?)""",(d["course"],d["stream"],d["semester"],d["subject"],price,now()))
         context.user_data.clear()
@@ -398,6 +402,71 @@ async def featured_notes(q):
     kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
     await q.edit_message_text("⭐ Featured Notes",reply_markup=InlineKeyboardMarkup(kb))
 
+async def search_prompt(q, context):
+    context.user_data["user_action"] = "search"
+    await q.edit_message_text(
+        "🔎 Search Notes\n\nSubject, course या keyword लिखें।\nउदाहरण: Physics, Mathematics, Chemistry",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]])
+    )
+
+
+async def search_results_from_message(update, query):
+    query = query.strip()
+    like = f"%{query}%"
+    with db() as c:
+        rows = c.execute("""
+            SELECT * FROM products
+            WHERE active=1 AND file_id<>''
+              AND (subject LIKE ? OR course LIKE ? OR stream LIKE ?)
+            ORDER BY id DESC LIMIT 20
+        """, (like, like, like)).fetchall()
+    kb = [[InlineKeyboardButton(f"📖 {r['subject']} • ⭐{r['price']}", callback_data=f"prod:{r['id']}")] for r in rows]
+    kb += [[InlineKeyboardButton("🔎 Search Again",callback_data="search")],
+           [InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]]
+    text = f"🔎 Search results for: {query}\n\n" + (f"{len(rows)} Notes मिले:" if rows else "कोई matching Notes नहीं मिले।")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def help_menu(q):
+    text = (
+        "❓ RU Notes Store — Help\n\n"
+        "1️⃣ Course → Semester → Subject चुनें।\n"
+        "2️⃣ उपलब्ध Notes खोलें।\n"
+        "3️⃣ Buy Now दबाकर Telegram Stars से payment करें।\n"
+        "4️⃣ Payment successful होने पर PDF Telegram में automatically मिलेगा।\n\n"
+        "📩 Notes नहीं मिल रहे हों तो Request Notes से Admin को बताएं।"
+    )
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Select Course",callback_data="home")],
+        [InlineKeyboardButton("🛒 My Purchases",callback_data="purchases")],
+        [InlineKeyboardButton("📩 Request Notes",callback_data="request")],
+        [InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]
+    ]))
+
+
+async def channel_menu(q):
+    if CHANNEL_USERNAME:
+        kb = [
+            [InlineKeyboardButton("📢 Join RU Notes Channel",url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
+            [InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]
+        ]
+        text = "📢 Latest updates और नए Notes के लिए हमारे Telegram Channel से जुड़ें।"
+    else:
+        kb = [[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]]
+        text = "📢 Channel अभी configure नहीं किया गया है। Admin से CHANNEL_USERNAME secret में सेट करवाएं।"
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def user_text(update, context):
+    if update.effective_user.id == ADMIN_CHAT_ID:
+        return
+    if context.user_data.get("user_action") != "search":
+        return
+    query = (update.message.text or "").strip()
+    context.user_data.pop("user_action", None)
+    await search_results_from_message(update, query)
+
+
 async def request_notes(q):
     kb=[]
     if ADMIN_USERNAME:
@@ -410,11 +479,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     d=q.data
     if d=="home": await q.edit_message_text("Course चुनें:",reply_markup=main_menu()); return
+    if d=="channel": await channel_menu(q); return
+    if d=="help": await help_menu(q); return
     if d=="latest": await latest_notes(q); return
     if d=="featured": await featured_notes(q); return
     if d=="request": await request_notes(q); return
-    if d=="search":
-        await q.edit_message_text("🔎 अभी Course → Semester → Subject से Notes चुनें।",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Main Menu",callback_data="home")]])); return
+    if d=="search": await search_prompt(q,context); return
     if d.startswith("course:"): await choose_course(q,d.split(":")[1]); return
     if d.startswith("stream:"):
         _,course,stream=d.split(":"); await choose_semester(q,course,stream); return
@@ -436,6 +506,25 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not r: await q.answer("यह PDF आपकी purchase में नहीं है।",show_alert=True); return
         await q.message.reply_document(r["file_id"],caption=f"📚 {r['subject']}")
         return
+    if d.startswith("admfilter:") and admin_only(q.from_user.id):
+        filt=d.split(":")[1]
+        with db() as c:
+            if filt in ("pending","paid","failed"):
+                rows=c.execute("SELECT id,telegram_id,price,status,created_at FROM orders WHERE status=? ORDER BY id DESC LIMIT 30",(filt.upper(),)).fetchall()
+                title=f"📦 {filt.title()} Orders"
+            elif filt=="today":
+                rows=c.execute("SELECT id,telegram_id,price,status,created_at FROM orders WHERE substr(created_at,1,10)=? ORDER BY id DESC LIMIT 30",(date.today().isoformat(),)).fetchall()
+                title="📅 Today's Orders"
+            else:
+                rows=c.execute("SELECT id,telegram_id,price,status,created_at FROM orders WHERE substr(created_at,1,7)=? ORDER BY id DESC LIMIT 30",(date.today().strftime("%Y-%m"),)).fetchall()
+                title="📆 This Month's Orders"
+        text=title+"\n\n"+("\n".join(f"#{r['id']} • user {r['telegram_id']} • ⭐{r['price']} • {r['status']} • {r['created_at'][:16]}" for r in rows) or "No matching orders")
+        await q.edit_message_text(text[:4000],reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Orders",callback_data="adm:orders")],
+            [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
+        ])); return
+    if d=="adm:home" and admin_only(q.from_user.id):
+        await q.edit_message_text("🔐 Admin Panel",reply_markup=admin_menu()); return
     if d.startswith("adm:") and admin_only(q.from_user.id):
         a=d.split(":")[1]
         if a=="add": await admin_add_start(q,context); return
@@ -443,8 +532,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if a=="price": await admin_price_start(q,context); return
         if a=="broadcast": await admin_broadcast_start(q,context); return
         if a=="users":
-            with db() as c: n=c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            await q.edit_message_text(f"👤 Total Users: {n}",reply_markup=admin_menu()); return
+            with db() as c:
+                n=c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                recent=c.execute("SELECT telegram_id,username,first_name FROM users ORDER BY rowid DESC LIMIT 15").fetchall()
+            details="\n".join(f"• {r['first_name'] or 'User'} @{r['username'] or '-'} — {r['telegram_id']}" for r in recent) or "No users"
+            await q.edit_message_text(f"👤 Total Users: {n}\n\nRecent users:\n{details}",reply_markup=admin_menu()); return
         if a=="products":
             with db() as c:
                 rows=c.execute("SELECT id,course,stream,semester,subject,price,file_id,active FROM products ORDER BY id DESC LIMIT 50").fetchall()
@@ -460,8 +552,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rows=c.execute("SELECT status,COUNT(*) n FROM orders GROUP BY status").fetchall()
                 latest=c.execute("SELECT id,telegram_id,price,status,created_at FROM orders ORDER BY id DESC LIMIT 10").fetchall()
             text="📦 Orders\n" + ("\n".join(f"{r['status']}: {r['n']}" for r in rows) or "No orders")
-            text+="\n\nRecent:\n"+"\n".join(f"#{r['id']} user {r['telegram_id']} ⭐{r['price']} {r['status']}" for r in latest)
-            await q.edit_message_text(text[:4000],reply_markup=admin_menu()); return
+            text+="\n\nRecent:\n"+"\n".join(f"#{r['id']} user {r['telegram_id']} ⭐{r['price']} {r['status']} {r['created_at'][:10]}" for r in latest)
+            kb=[
+                [InlineKeyboardButton("🟡 Pending",callback_data="admfilter:pending"), InlineKeyboardButton("🟢 Paid",callback_data="admfilter:paid")],
+                [InlineKeyboardButton("🔴 Failed",callback_data="admfilter:failed"), InlineKeyboardButton("📅 Today",callback_data="admfilter:today")],
+                [InlineKeyboardButton("📆 This Month",callback_data="admfilter:month")],
+                [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
+            ]
+            await q.edit_message_text(text[:4000],reply_markup=InlineKeyboardMarkup(kb)); return
         if a=="sales":
             today=date.today().isoformat()
             month=date.today().strftime("%Y-%m")
@@ -474,7 +572,12 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mo+=c.execute("SELECT COALESCE(SUM(price),0) FROM bundle_orders WHERE status='PAID' AND substr(created_at,1,7)=?",(month,)).fetchone()[0]
                 cnt=c.execute("SELECT COUNT(*) FROM orders WHERE status='PAID'").fetchone()[0]
                 bcnt=c.execute("SELECT COUNT(*) FROM bundle_orders WHERE status='PAID'").fetchone()[0]
-            await q.edit_message_text(f"📊 Sales\nPaid Orders: {cnt} + {bcnt} bundles\nTotal Sales: ⭐ {total+bundle_total}\nToday: ⭐ {td}\nThis Month: ⭐ {mo}",reply_markup=admin_menu()); return
+                top=c.execute("""SELECT p.subject,COUNT(*) n FROM orders o JOIN products p ON p.id=o.product_id
+                                 WHERE o.status='PAID' GROUP BY o.product_id ORDER BY n DESC LIMIT 5""").fetchall()
+            top_text="\n".join(f"• {r['subject']} — {r['n']} sales" for r in top) or "No sales yet"
+            await q.edit_message_text(
+                f"📊 Sales\nPaid Orders: {cnt} + {bcnt} bundles\nTotal Sales: ⭐ {total+bundle_total}\nToday: ⭐ {td}\nThis Month: ⭐ {mo}\n\n🔥 Top-selling Notes\n{top_text}",
+                reply_markup=admin_menu()); return
         if a=="settings":
             await q.edit_message_text(f"⚙️ Settings\nAdmin ID: {ADMIN_CHAT_ID}\nAdmin Username: {ADMIN_USERNAME or 'not set'}\nDatabase: {DB_PATH}\nBundle Discount: {BUNDLE_DISCOUNT_PERCENT}%",reply_markup=admin_menu()); return
 
@@ -492,6 +595,7 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,successful))
     app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,user_text))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,admin_text))
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
