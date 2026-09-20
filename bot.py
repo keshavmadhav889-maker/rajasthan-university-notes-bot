@@ -3,7 +3,7 @@ import sqlite3
 import logging
 from datetime import datetime, timezone, date
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, PreCheckoutQueryHandler, filters
@@ -335,12 +335,23 @@ async def admin_text(update, context):
         except: await update.message.reply_text("Price केवल positive number में भेजें।"); return
         d=context.user_data
         with db() as c:
-            c.execute("""INSERT OR IGNORE INTO subject_catalog(course,stream,semester,subject,active) VALUES(?,?,?,?,1)""",
+            c.execute("""INSERT INTO subject_catalog(course,stream,semester,subject,active)
+                         VALUES(?,?,?,?,1)
+                         ON CONFLICT(course,stream,semester,subject)
+                         DO UPDATE SET active=1""",
                       (d["course"],d["stream"],d["semester"],d["subject"]))
-            c.execute("""INSERT OR IGNORE INTO products(course,stream,semester,subject,price,file_id,active,created_at)
-                         VALUES(?,?,?,?,?,'',1,?)""",(d["course"],d["stream"],d["semester"],d["subject"],price,now()))
-        context.user_data.clear()
-        await update.message.reply_text("✅ Subject/Product add हो गया।\nअब PDF upload करने के लिए Admin Panel → Upload PDF चुनें।",reply_markup=admin_menu())
+            c.execute("""INSERT INTO products(course,stream,semester,subject,price,file_id,active,created_at)
+                         VALUES(?,?,?,?,?,'',1,?)
+                         ON CONFLICT(course,stream,semester,subject)
+                         DO UPDATE SET price=excluded.price, active=1""",
+                      (d["course"],d["stream"],d["semester"],d["subject"],price,now()))
+            p=c.execute("""SELECT id FROM products
+                           WHERE course=? AND stream=? AND semester=? AND subject=?""",
+                        (d["course"],d["stream"],d["semester"],d["subject"])).fetchone()
+        context.user_data.update(admin_action="upload_pdf",product_id=int(p["id"]))
+        await update.message.reply_text(
+            f"✅ Subject/Product save हो गया।\nProduct ID: #{p['id']}\n\nअब इसी chat में PDF को Document के रूप में भेजें।\nPDF upload होते ही Student के लिए Buy Now और payment चालू हो जाएगा.",
+            reply_markup=admin_menu())
         return
     if action=="upload_id":
         if not text.isdigit():
@@ -584,11 +595,33 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update,context):
     log.exception("Unhandled error",exc_info=context.error)
 
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("📚 Main Menu", reply_markup=main_menu())
+
+async def courses_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("🎓 Course चुनें:", reply_markup=main_menu())
+
+async def post_init(app):
+    await app.bot.set_my_commands([
+        BotCommand("menu", "🏠 Main Menu"),
+        BotCommand("courses", "🎓 Courses"),
+        BotCommand("purchases", "🛒 My Purchases"),
+        BotCommand("latest", "🆕 Latest Notes"),
+        BotCommand("featured", "⭐ Featured"),
+        BotCommand("request", "📩 Request Notes"),
+        BotCommand("help", "❓ Help"),
+    ])
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
 def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     db().close()
-    app=Application.builder().token(BOT_TOKEN).build()
+    app=Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("menu",menu_command))
+    app.add_handler(CommandHandler("courses",courses_command))
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
