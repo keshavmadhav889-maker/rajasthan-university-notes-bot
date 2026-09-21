@@ -677,8 +677,10 @@ def main():
     app.add_handler(PreCheckoutQueryHandler(precheckout))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,successful))
     app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,user_text))
+    # Admin text handler must come before the generic student text handler.
+    # In python-telegram-bot, the first matching handler in a group handles the update.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,admin_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,user_text))
     app.add_error_handler(error_handler)
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
