@@ -639,6 +639,29 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
     await update.message.reply_text("📩 जिस Subject के Notes चाहिए, Admin को Course + Semester + Subject भेजें.",reply_markup=InlineKeyboardMarkup(kb))
 
+async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📜 Terms & Conditions\n\n"
+        "• Notes/PDF की digital delivery payment successful होने के बाद Telegram पर की जाती है।\n"
+        "• Purchase से पहले product details और price ध्यान से जांचें।\n"
+        "• Payment या delivery समस्या के लिए /paysupport से Admin support लें।\n"
+        "• Unauthorized redistribution/sharing से बचें।"
+    )
+
+async def paysupport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if ADMIN_USERNAME:
+        await update.message.reply_text(
+            "💬 Payment Support\n\n"
+            "Payment, duplicate charge या PDF delivery से जुड़ी समस्या के लिए Admin से संपर्क करें।",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Admin Support",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")]
+            ])
+        )
+    else:
+        await update.message.reply_text(
+            "💬 Payment Support\n\nAdmin username अभी configure नहीं है।"
+        )
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ RU Notes Store — Help\n\n"
@@ -656,6 +679,8 @@ async def post_init(app):
         BotCommand("featured", "⭐ Featured"),
         BotCommand("request", "📩 Request Notes"),
         BotCommand("help", "❓ Help"),
+        BotCommand("terms", "📜 Terms & Conditions"),
+        BotCommand("paysupport", "💬 Payment Support"),
     ])
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
@@ -671,6 +696,8 @@ def main():
     app.add_handler(CommandHandler("featured",featured_command))
     app.add_handler(CommandHandler("request",request_command))
     app.add_handler(CommandHandler("help",help_command))
+    app.add_handler(CommandHandler("terms",terms_command))
+    app.add_handler(CommandHandler("paysupport",paysupport_command))
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
