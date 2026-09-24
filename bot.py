@@ -4,7 +4,7 @@ import logging
 import tempfile
 from datetime import datetime, timezone, date
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands, FSInputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands, InputFile
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, PreCheckoutQueryHandler, filters
