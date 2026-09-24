@@ -608,9 +608,18 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if d.startswith("admpricecustom:") and admin_only(q.from_user.id):
         pid=int(d.split(":")[1])
-        context.user_data.update(admin_action="price_custom",product_id=pid)
-        await q.edit_message_text(f"✏️ Custom Price\n\nProduct #{pid}\nनई price number में भेजें।\nउदाहरण: 75",
-                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]]))
+        if pid==0:
+            context.user_data["admin_action"]="add_price"
+            await q.edit_message_text(
+                "✏️ Custom Price\n\nनई price number में भेजें।\nउदाहरण: 75",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]])
+            )
+        else:
+            context.user_data.update(admin_action="price_custom",product_id=pid)
+            await q.edit_message_text(
+                f"✏️ Custom Price\n\nProduct #{pid}\nनई price number में भेजें।\nउदाहरण: 75",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]])
+            )
         return
     if d.startswith("course:"): await choose_course(q,d.split(":")[1]); return
     if d.startswith("stream:"):
