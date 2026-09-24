@@ -194,20 +194,15 @@ async def show_product(q, pid):
     kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"sem:{r['course']}:{r['stream']}:{r['semester']}")])
     await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
 
-async def send_demo(q, pid, context):
-    """Send the first 4 pages of a PDF as a free demo."""
+async def create_demo_file_id(context, product_id):
+    """Create and cache a 4-page demo PDF from the uploaded original PDF."""
     with db() as c:
-        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(product_id,)).fetchone()
     if not p:
-        await q.answer("PDF अभी उपलब्ध नहीं है।", show_alert=True)
-        return
+        return None, "PDF उपलब्ध नहीं है।"
     if p["preview_file_id"]:
-        await q.message.reply_document(
-            p["preview_file_id"],
-            caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {DEMO_PAGES} pages\n💡 पसंद आए तो Buy Now करें।"
-        )
-        return
-    await q.answer("📄 Demo तैयार किया जा रहा है…")
+        return p["preview_file_id"], None
+
     temp_pdf = None
     temp_demo = None
     try:
@@ -216,34 +211,74 @@ async def send_demo(q, pid, context):
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as src:
             temp_pdf = src.name
         await tg_file.download_to_drive(temp_pdf)
+
         reader = PdfReader(temp_pdf)
         total = len(reader.pages)
         if total == 0:
-            await q.message.reply_text("इस PDF में कोई page नहीं मिला।")
-            return
+            return None, "इस PDF में कोई page नहीं मिला।"
+
+        # Four representative pages: first 2 + middle + last.
+        # If the PDF has fewer than 4 pages, use all available pages.
+        if total <= DEMO_PAGES:
+            indexes = list(range(total))
+        else:
+            indexes = sorted(set([0, 1, total // 2, total - 1]))
+
         writer = PdfWriter()
-        for page in reader.pages[:DEMO_PAGES]:
-            writer.add_page(page)
+        for i in indexes:
+            writer.add_page(reader.pages[i])
+
         with tempfile.NamedTemporaryFile(suffix="_demo.pdf", delete=False) as out:
             temp_demo = out.name
         with open(temp_demo, "wb") as fh:
             writer.write(fh)
+
+        # Telegram needs a chat upload before it gives the bot a reusable file_id.
+        # Store the generated demo in the admin chat; students then receive the
+        # cached file_id without regenerating the PDF.
         with open(temp_demo, "rb") as demo_fh:
-            sent = await q.message.reply_document(
-                InputFile(demo_fh, filename=f"{p['subject']}_Free_Demo.pdf"),
-                caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {min(DEMO_PAGES,total)} pages\n💡 Notes पसंद आए तो वापस जाकर Buy Now करें।"
+            sent = await context.bot.send_document(
+                chat_id=ADMIN_CHAT_ID,
+                document=InputFile(demo_fh, filename=f"{p['subject']}_Free_Demo.pdf"),
+                caption=f"🛠️ Auto Demo Created — #{product_id}\n{p['subject']}\n📄 {len(indexes)} representative pages"
             )
-        if sent.document:
-            with db() as c:
-                c.execute("UPDATE products SET preview_file_id=? WHERE id=?",(sent.document.file_id,pid))
-    except Exception:
-        log.exception("demo generation failed for product %s", pid)
-        await q.message.reply_text("❌ Demo PDF तैयार नहीं हो सकी। Admin से PDF दोबारा upload करवाएं।")
+
+        if not sent.document:
+            return None, "Telegram demo upload नहीं कर पाया।"
+
+        with db() as c:
+            c.execute("UPDATE products SET preview_file_id=? WHERE id=?",
+                      (sent.document.file_id, product_id))
+        return sent.document.file_id, None
+    except Exception as e:
+        log.exception("demo generation failed for product %s: %s", product_id, e)
+        return None, "Demo PDF तैयार नहीं हो सकी।"
     finally:
         for path in (temp_pdf, temp_demo):
             if path:
                 try: os.remove(path)
                 except OSError: pass
+
+async def send_demo(q, pid, context):
+    """Send the cached/generated 4-page demo to the student."""
+    with db() as c:
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
+    if not p:
+        await q.answer("PDF अभी उपलब्ध नहीं है।", show_alert=True)
+        return
+
+    preview_id = p["preview_file_id"]
+    if not preview_id:
+        await q.answer("📄 Demo तैयार किया जा रहा है…")
+        preview_id, err = await create_demo_file_id(context, pid)
+        if not preview_id:
+            await q.message.reply_text(f"❌ {err} Admin से PDF दोबारा upload करवाएं।")
+            return
+
+    await q.message.reply_document(
+        preview_id,
+        caption=f"👀 Free Demo — {p['subject']}\n📄 4 representative pages\n💡 Notes पसंद आए तो Buy Now करें।"
+    )
 
 async def buy(q, pid):
     with db() as c:
@@ -349,11 +384,16 @@ def admin_course_buttons(prefix="adducourse"):
     ])
 
 def admin_semester_buttons(prefix, course, stream):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣",callback_data=f"{prefix}:{course}:{stream}:1"), InlineKeyboardButton("2️⃣",callback_data=f"{prefix}:{course}:{stream}:2"), InlineKeyboardButton("3️⃣",callback_data=f"{prefix}:{course}:{stream}:3")],
-        [InlineKeyboardButton("4️⃣",callback_data=f"{prefix}:{course}:{stream}:4"), InlineKeyboardButton("5️⃣",callback_data=f"{prefix}:{course}:{stream}:5"), InlineKeyboardButton("6️⃣",callback_data=f"{prefix}:{course}:{stream}:6")],
-        [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
-    ])
+    # UOR 2025-27 PG semester schemes are generally I-IV; UG NEP programmes use I-VI.
+    semesters = [1,2,3,4] if course in {"MCOM","MSC","MA"} else [1,2,3,4,5,6]
+    rows=[]
+    for i in range(0,len(semesters),3):
+        rows.append([
+            InlineKeyboardButton(f"{n}️⃣",callback_data=f"{prefix}:{course}:{stream}:{n}")
+            for n in semesters[i:i+3]
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")])
+    return InlineKeyboardMarkup(rows)
 
 def admin_price_buttons(prefix, pid):
     prices=[20,29,49,50,79,99,149,199,299]
@@ -463,16 +503,31 @@ async def admin_document(update, context):
     if context.user_data.get("admin_action")!="upload_pdf": return
     pid=context.user_data.get("product_id")
     if not update.message.document: return
-    if update.message.document.mime_type not in ("application/pdf","application/octet-stream") and not update.message.document.file_name.lower().endswith(".pdf"):
-        await update.message.reply_text("कृपया PDF document भेजें।"); return
+    filename = update.message.document.file_name or ""
+    mime = update.message.document.mime_type or ""
+    if mime not in ("application/pdf","application/octet-stream") and not filename.lower().endswith(".pdf"):
+        await update.message.reply_text("कृपया PDF document भेजें।")
+        return
+
     with db() as c:
         c.execute("UPDATE products SET file_id=?,preview_file_id='' WHERE id=?",
                   (update.message.document.file_id,pid))
+        p=c.execute("SELECT subject FROM products WHERE id=?",(pid,)).fetchone()
+
+    # Demo is created automatically immediately after the original PDF upload.
+    preview_id, demo_error = await create_demo_file_id(context, pid)
     context.user_data.clear()
+
+    if preview_id:
+        demo_status = "✅ 4-page Free Demo अपने-आप तैयार हो गया है।"
+    else:
+        demo_status = f"⚠️ Original PDF upload हो गई, लेकिन Demo नहीं बन सका: {demo_error}"
+
     await update.message.reply_text(
         f"✅ Product #{pid} की PDF upload हो गई।\n\n"
-        f"👀 Free Demo: पहले {DEMO_PAGES} pages\n"
-        "Student को Subject खोलते ही 4-Page Free Demo button दिखेगा।",
+        f"📝 {p['subject'] if p else 'Note'}\n"
+        f"{demo_status}\n\n"
+        "Student को Subject खोलने पर 👀 4-Page Free Demo मिलेगा।",
         reply_markup=admin_menu())
 
 async def latest_notes(q):
