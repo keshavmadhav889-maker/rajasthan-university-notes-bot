@@ -228,10 +228,11 @@ async def send_demo(q, pid, context):
             temp_demo = out.name
         with open(temp_demo, "wb") as fh:
             writer.write(fh)
-        sent = await q.message.reply_document(
-            FSInputFile(temp_demo, filename=f"{p['subject']}_Free_Demo.pdf"),
-            caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {min(DEMO_PAGES,total)} pages\n💡 Notes पसंद आए तो वापस जाकर Buy Now करें।"
-        )
+        with open(temp_demo, "rb") as demo_fh:
+            sent = await q.message.reply_document(
+                InputFile(demo_fh, filename=f"{p['subject']}_Free_Demo.pdf"),
+                caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {min(DEMO_PAGES,total)} pages\n💡 Notes पसंद आए तो वापस जाकर Buy Now करें।"
+            )
         if sent.document:
             with db() as c:
                 c.execute("UPDATE products SET preview_file_id=? WHERE id=?",(sent.document.file_id,pid))
