@@ -2,6 +2,11 @@ import os
 import sqlite3
 import logging
 import tempfile
+import asyncio
+import json
+import base64
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands, InputFile
@@ -18,6 +23,8 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
 DB_PATH = os.getenv("DATABASE_PATH", "bot.db")
 BUNDLE_DISCOUNT_PERCENT = max(0, min(90, int(os.getenv("BUNDLE_DISCOUNT_PERCENT", "20"))))
 DEMO_PAGES = 4
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ru-notes-bot")
@@ -64,7 +71,8 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS orders(
         id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, product_id INTEGER NOT NULL,
         payload TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL,
-        telegram_charge_id TEXT DEFAULT '', created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
+        telegram_charge_id TEXT DEFAULT '', payment_link_id TEXT DEFAULT '', razorpay_payment_id TEXT DEFAULT '',
+        created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
     c.execute("""CREATE TABLE IF NOT EXISTS subject_catalog(
         id INTEGER PRIMARY KEY AUTOINCREMENT, course TEXT NOT NULL, stream TEXT DEFAULT '',
         semester INTEGER NOT NULL, subject TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
@@ -74,10 +82,146 @@ def db():
         course TEXT NOT NULL, stream TEXT DEFAULT '', semester INTEGER NOT NULL,
         payload TEXT NOT NULL, price INTEGER NOT NULL, original_price INTEGER NOT NULL,
         discount_percent INTEGER NOT NULL, status TEXT NOT NULL,
-        telegram_charge_id TEXT DEFAULT '', created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
+        telegram_charge_id TEXT DEFAULT '', payment_link_id TEXT DEFAULT '', razorpay_payment_id TEXT DEFAULT '',
+        created_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)""")
+    order_cols=[r["name"] for r in c.execute("PRAGMA table_info(orders)").fetchall()]
+    for col in ("payment_link_id","razorpay_payment_id"):
+        if col not in order_cols:
+            c.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
+    bundle_cols=[r["name"] for r in c.execute("PRAGMA table_info(bundle_orders)").fetchall()]
+    for col in ("payment_link_id","razorpay_payment_id"):
+        if col not in bundle_cols:
+            c.execute(f"ALTER TABLE bundle_orders ADD COLUMN {col} TEXT DEFAULT ''")
     seed_catalog(c)
     c.commit()
     return c
+
+def razorpay_enabled():
+    return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+
+
+def razorpay_api(method, path, payload=None):
+    token = base64.b64encode(f"{RAZORPAY_KEY_ID}:{RAZORPAY_KEY_SECRET}".encode()).decode()
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        f"https://api.razorpay.com{path}", data=data,
+        headers={"Authorization": f"Basic {token}", "Content-Type": "application/json",
+                 "User-Agent": "RU-Notes-Store/1.0"}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Razorpay API error {e.code}: {e.read().decode(errors='replace')[:500]}")
+
+
+async def create_payment_link(ref_id, user_id, amount, description):
+    if not razorpay_enabled():
+        raise RuntimeError("UPI gateway not configured")
+    payload={"amount":int(amount)*100,"currency":"INR","accept_partial":False,
+             "reference_id":f"RU{ref_id}{user_id}"[:40],"description":description[:255],
+             "reminder_enable":False,
+             "notes":{"order_id":str(ref_id),"telegram_user_id":str(user_id)}}
+    return await asyncio.to_thread(razorpay_api,"POST","/v1/payment_links",payload)
+
+
+async def fetch_payment_link(link_id):
+    return await asyncio.to_thread(razorpay_api,"GET",f"/v1/payment_links/{link_id}")
+
+
+def payment_buttons(order_id, short_url, bundle=False):
+    check=f"bundlecheck:{order_id}" if bundle else f"paycheck:{order_id}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 UPI / Card से Pay करें",url=short_url)],
+        [InlineKeyboardButton("✅ मैंने Payment कर दी — Check करें",callback_data=check)],
+        [InlineKeyboardButton("❌ Cancel",callback_data="home")]
+    ])
+
+
+async def deliver_note(q, order_id):
+    with db() as c:
+        r=c.execute("""SELECT o.status,o.delivered,p.file_id,p.subject,p.price
+                       FROM orders o JOIN products p ON p.id=o.product_id
+                       WHERE o.id=? AND o.telegram_id=?""",(order_id,q.from_user.id)).fetchone()
+        if not r:
+            await q.answer("Order नहीं मिला।",show_alert=True); return
+        if r["status"]!="PAID":
+            await q.answer("Payment verify नहीं हुई।",show_alert=True); return
+        if r["delivered"]:
+            await q.answer("PDF पहले ही भेजी जा चुकी है."); return
+        if not r["file_id"]:
+            await q.answer("Payment मिल गई है, लेकिन PDF उपलब्ध नहीं है। Admin से संपर्क करें।",show_alert=True); return
+        c.execute("UPDATE orders SET delivered=1 WHERE id=?",(order_id,))
+    await q.message.reply_document(r["file_id"],caption=f"✅ Payment Verified\n📚 {r['subject']}\n💰 ₹{r['price']}\n📥 आपकी Notes PDF")
+
+
+async def verify_note_payment(q, order_id):
+    with db() as c:
+        o=c.execute("SELECT * FROM orders WHERE id=? AND telegram_id=?",(order_id,q.from_user.id)).fetchone()
+    if not o:
+        await q.answer("Order नहीं मिला।",show_alert=True); return
+    if o["status"]=="PAID":
+        await deliver_note(q,order_id); return
+    if not o["payment_link_id"]:
+        await q.answer("Payment link नहीं मिला। फिर से Buy Now करें।",show_alert=True); return
+    try:
+        data=await fetch_payment_link(o["payment_link_id"])
+        paid=int(data.get("amount_paid",0) or 0)
+        if str(data.get("status","")).lower()=="paid" and paid >= int(o["price"])*100:
+            with db() as c:
+                c.execute("UPDATE orders SET status='PAID',razorpay_payment_id=? WHERE id=? AND status='PENDING'",
+                          (str(data.get("id","")),order_id))
+            await q.answer("✅ Payment verified!")
+            await deliver_note(q,order_id)
+        else:
+            await q.answer("⏳ Payment अभी confirm नहीं हुई। Payment के बाद फिर Check करें।",show_alert=True)
+    except Exception:
+        log.exception("payment verification failed")
+        await q.answer("Payment verification अभी नहीं हो पाई। बाद में फिर कोशिश करें।",show_alert=True)
+
+
+async def deliver_bundle(q, bundle_id):
+    with db() as c:
+        b=c.execute("SELECT * FROM bundle_orders WHERE id=? AND telegram_id=?",(bundle_id,q.from_user.id)).fetchone()
+        if not b:
+            await q.answer("Bundle order नहीं मिला।",show_alert=True); return
+        if b["status"]!="PAID":
+            await q.answer("Payment verify नहीं हुई।",show_alert=True); return
+        if b["delivered"]:
+            await q.answer("Semester Pack पहले ही भेजा जा चुका है."); return
+        rows=c.execute("""SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1 AND file_id<>'' ORDER BY subject""",
+                       (b["course"],b["stream"],b["semester"])).fetchall()
+        if not rows:
+            await q.answer("Payment मिल गई है, लेकिन Pack की PDFs उपलब्ध नहीं हैं। Admin से संपर्क करें।",show_alert=True); return
+        c.execute("UPDATE bundle_orders SET delivered=1 WHERE id=?",(bundle_id,))
+    await q.message.reply_text(f"✅ Payment Verified\n📦 Semester {b['semester']} Pack\n💰 ₹{b['price']}\n📥 आपकी Notes PDFs:")
+    for p in rows:
+        await q.message.reply_document(p["file_id"],caption=f"📚 {p['subject']}")
+
+
+async def verify_bundle_payment(q, bundle_id):
+    with db() as c:
+        b=c.execute("SELECT * FROM bundle_orders WHERE id=? AND telegram_id=?",(bundle_id,q.from_user.id)).fetchone()
+    if not b:
+        await q.answer("Bundle order नहीं मिला।",show_alert=True); return
+    if b["status"]=="PAID":
+        await deliver_bundle(q,bundle_id); return
+    if not b["payment_link_id"]:
+        await q.answer("Payment link नहीं मिला। फिर से Pack खरीदें।",show_alert=True); return
+    try:
+        data=await fetch_payment_link(b["payment_link_id"])
+        paid=int(data.get("amount_paid",0) or 0)
+        if str(data.get("status","")).lower()=="paid" and paid >= int(b["price"])*100:
+            with db() as c:
+                c.execute("UPDATE bundle_orders SET status='PAID',razorpay_payment_id=? WHERE id=? AND status='PENDING'",
+                          (str(data.get("id","")),bundle_id))
+            await q.answer("✅ Payment verified!")
+            await deliver_bundle(q,bundle_id)
+        else:
+            await q.answer("⏳ Payment अभी confirm नहीं हुई। Payment के बाद फिर Check करें।",show_alert=True)
+    except Exception:
+        log.exception("bundle payment verification failed")
+        await q.answer("Payment verification अभी नहीं हो पाई। बाद में फिर कोशिश करें।",show_alert=True)
+
 
 def main_menu():
     return InlineKeyboardMarkup([
@@ -281,44 +425,59 @@ async def send_demo(q, pid, context):
     )
 
 async def buy(q, pid):
+    if not razorpay_enabled():
+        await q.message.reply_text("💳 UPI Payment अभी configure नहीं है। Admin से gateway credentials जोड़ने के बाद Buy Now चालू होगा।"); return
     with db() as c:
-        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
+        p=c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
         if not p:
             await q.answer("PDF अभी उपलब्ध नहीं है।",show_alert=True); return
-        payload = f"RU_NOTE:{q.from_user.id}:{pid}:{int(datetime.now().timestamp())}"
-        c.execute("""INSERT INTO orders(telegram_id,product_id,payload,price,status,created_at)
-                     VALUES(?,?,?,?,?,?)""",(q.from_user.id,pid,payload,p["price"],"PENDING",now()))
-    await q.message.reply_invoice(
-        title=p["subject"][:32],
-        description=f"Rajasthan University Notes - {p['subject']}"[:255],
-        payload=payload, currency="XTR",
-        prices=[LabeledPrice(p["subject"][:32],p["price"])],
-        provider_token="", start_parameter=f"ru-note-{pid}")
+        payload=f"RU_NOTE:{q.from_user.id}:{pid}:{int(datetime.now().timestamp())}"
+        cur=c.execute("""INSERT INTO orders(telegram_id,product_id,payload,price,status,created_at)
+                         VALUES(?,?,?,?,?,?)""",(q.from_user.id,pid,payload,p["price"],"PENDING",now()))
+        oid=cur.lastrowid
+    try:
+        link=await create_payment_link(oid,q.from_user.id,p["price"],f"Rajasthan University Notes - {p['subject']}")
+        if not link.get("id") or not link.get("short_url"): raise RuntimeError("Payment link नहीं मिला")
+        with db() as c: c.execute("UPDATE orders SET payment_link_id=? WHERE id=?",(link["id"],oid))
+        await q.message.reply_text(
+            f"💳 Payment करें\n\n📚 {p['subject']}\n💰 Amount: ₹{p['price']}\n\nUPI / Card से payment करें।\nPayment के बाद नीचे Check button दबाएं।",
+            reply_markup=payment_buttons(oid,link["short_url"]))
+    except Exception:
+        log.exception("payment link creation failed")
+        with db() as c: c.execute("UPDATE orders SET status='FAILED' WHERE id=? AND status='PENDING'",(oid,))
+        await q.message.reply_text("❌ Payment link अभी नहीं बन पाया। कृपया थोड़ी देर बाद फिर Buy Now करें।")
 
 async def buy_bundle(q, course, stream, sem):
-    sem = int(sem)
+    if not razorpay_enabled():
+        await q.message.reply_text("💳 UPI Payment अभी configure नहीं है। Admin से gateway credentials जोड़ने के बाद Pack payment चालू होगा।"); return
+    sem=int(sem)
     with db() as c:
-        catalog = c.execute("""SELECT subject FROM subject_catalog
-                               WHERE course=? AND stream=? AND semester=? AND active=1
-                               ORDER BY subject""",(course,stream,sem)).fetchall()
+        catalog=c.execute("""SELECT subject FROM subject_catalog WHERE course=? AND stream=? AND semester=? AND active=1 ORDER BY subject""",(course,stream,sem)).fetchall()
         if not catalog:
             await q.answer("इस Semester की Subject list अभी उपलब्ध नहीं है।",show_alert=True); return
         names=[r["subject"] for r in catalog]
-        placeholders=",".join("?" for _ in names)
-        rows=c.execute(f"""SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1
-                           AND subject IN ({placeholders})""",(course,stream,sem,*names)).fetchall()
+        ph=",".join("?" for _ in names)
+        rows=c.execute(f"""SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1 AND subject IN ({ph})""",(course,stream,sem,*names)).fetchall()
         by={r["subject"]:r for r in rows}
         if len(by)!=len(names) or any(not by[n]["file_id"] for n in names):
             await q.answer("Complete Semester Pack अभी पूरा उपलब्ध नहीं है।",show_alert=True); return
         original=sum(by[n]["price"] for n in names)
         final=max(1,round(original*(100-BUNDLE_DISCOUNT_PERCENT)/100))
         payload=f"RU_BUNDLE:{q.from_user.id}:{course}:{stream}:{sem}:{int(datetime.now().timestamp())}"
-        c.execute("""INSERT INTO bundle_orders(telegram_id,course,stream,semester,payload,price,original_price,discount_percent,status,created_at)
-                     VALUES(?,?,?,?,?,?,?,?,?,?)""",(q.from_user.id,course,stream,sem,payload,final,original,BUNDLE_DISCOUNT_PERCENT,"PENDING",now()))
-    await q.message.reply_invoice(title=f"{COURSES.get(course,course)} Sem {sem} Pack"[:32],
-        description=f"Complete Semester Notes Pack • {BUNDLE_DISCOUNT_PERCENT}% bundle discount"[:255],
-        payload=payload,currency="XTR",prices=[LabeledPrice("Complete Semester Pack",final)],
-        provider_token="",start_parameter=f"ru-pack-{course.lower()}-{sem}")
+        cur=c.execute("""INSERT INTO bundle_orders(telegram_id,course,stream,semester,payload,price,original_price,discount_percent,status,created_at)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",(q.from_user.id,course,stream,sem,payload,final,original,BUNDLE_DISCOUNT_PERCENT,"PENDING",now()))
+        bid=cur.lastrowid
+    try:
+        link=await create_payment_link(bid,q.from_user.id,final,f"{COURSES.get(course,course)} Semester {sem} Complete Notes Pack")
+        if not link.get("id") or not link.get("short_url"): raise RuntimeError("Payment link नहीं मिला")
+        with db() as c: c.execute("UPDATE bundle_orders SET payment_link_id=? WHERE id=?",(link["id"],bid))
+        await q.message.reply_text(
+            f"📦 Semester {sem} Complete Pack\n💰 Original: ₹{original}\n🎁 Discount: {BUNDLE_DISCOUNT_PERCENT}%\n💳 Pay: ₹{final}\n\nUPI / Card से payment करें।",
+            reply_markup=payment_buttons(bid,link["short_url"],bundle=True))
+    except Exception:
+        log.exception("bundle payment link creation failed")
+        with db() as c: c.execute("UPDATE bundle_orders SET status='FAILED' WHERE id=? AND status='PENDING'",(bid,))
+        await q.message.reply_text("❌ Semester Pack payment link अभी नहीं बन पाया। थोड़ी देर बाद फिर कोशिश करें।")
 
 async def show_missing(q, course, stream, sem):
     kb=[]
@@ -754,6 +913,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("bundle:"):
         _,course,stream,sem=d.split(":"); await buy_bundle(q,course,stream,int(sem)); return
     if d.startswith("buy:"): await buy(q,int(d.split(":")[1])); return
+    if d.startswith("paycheck:"):
+        await verify_note_payment(q,int(d.split(":")[1])); return
+    if d.startswith("bundlecheck:"):
+        await verify_bundle_payment(q,int(d.split(":")[1])); return
     if d=="purchases": await purchases(q); return
     if d.startswith("download:"):
         oid=int(d.split(":")[1])
@@ -834,7 +997,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                  WHERE o.status='PAID' GROUP BY o.product_id ORDER BY n DESC LIMIT 5""").fetchall()
             top_text="\n".join(f"• {r['subject']} — {r['n']} sales" for r in top) or "No sales yet"
             await q.edit_message_text(
-                f"📊 Sales\nPaid Orders: {cnt} + {bcnt} bundles\nTotal Sales: ⭐ {total+bundle_total}\nToday: ⭐ {td}\nThis Month: ⭐ {mo}\n\n🔥 Top-selling Notes\n{top_text}",
+                f"📊 Sales\nPaid Orders: {cnt} + {bcnt} bundles\nTotal Sales: ₹{total+bundle_total}\nToday: ₹{td}\nThis Month: ₹{mo}\n\n🔥 Top-selling Notes\n{top_text}",
                 reply_markup=admin_menu()); return
         if a=="settings":
             await q.edit_message_text(f"⚙️ Settings\nAdmin ID: {ADMIN_CHAT_ID}\nAdmin Username: {ADMIN_USERNAME or 'not set'}\nDatabase: {DB_PATH}\nBundle Discount: {BUNDLE_DISCOUNT_PERCENT}%",reply_markup=admin_menu()); return
@@ -914,7 +1077,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❓ RU Notes Store — Help\n\n"
         "Course → Semester → Subject चुनें।\n"
         "Available PDF खोलें → Buy Now → Telegram Stars से payment करें।\n"
-        "Payment successful होने पर PDF Telegram में मिलेगा.",
+        "Payment verify होने पर PDF Telegram में मिलेगा.",
         reply_markup=main_menu())
 
 async def post_init(app):
@@ -948,8 +1111,6 @@ def main():
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT,successful))
     app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
     # Admin text handler must come before the generic student text handler.
     # In python-telegram-bot, the first matching handler in a group handles the update.
