@@ -1,9 +1,10 @@
 import os
 import sqlite3
 import logging
+import tempfile
 from datetime import datetime, timezone, date
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, BotCommand, MenuButtonCommands, FSInputFile
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, PreCheckoutQueryHandler, filters
@@ -16,6 +17,7 @@ ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
 DB_PATH = os.getenv("DATABASE_PATH", "bot.db")
 BUNDLE_DISCOUNT_PERCENT = max(0, min(90, int(os.getenv("BUNDLE_DISCOUNT_PERCENT", "20"))))
+DEMO_PAGES = 4
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ru-notes-bot")
@@ -54,8 +56,11 @@ def db():
     c.execute("""CREATE TABLE IF NOT EXISTS products(
         id INTEGER PRIMARY KEY AUTOINCREMENT, course TEXT NOT NULL, stream TEXT DEFAULT '',
         semester INTEGER NOT NULL, subject TEXT NOT NULL, price INTEGER NOT NULL DEFAULT 0,
-        file_id TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+        file_id TEXT DEFAULT '', preview_file_id TEXT DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
         UNIQUE(course,stream,semester,subject))""")
+    cols = [r["name"] for r in c.execute("PRAGMA table_info(products)").fetchall()]
+    if "preview_file_id" not in cols:
+        c.execute("ALTER TABLE products ADD COLUMN preview_file_id TEXT DEFAULT ''")
     c.execute("""CREATE TABLE IF NOT EXISTS orders(
         id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL, product_id INTEGER NOT NULL,
         payload TEXT NOT NULL, price INTEGER NOT NULL, status TEXT NOT NULL,
@@ -180,12 +185,64 @@ async def show_product(q, pid):
         kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"sem:{r['course']}:{r['stream']}:{r['semester']}")])
         await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb)); return
     stream = f" / {r['stream']}" if r["stream"] else ""
-    text = f"📚 {COURSES.get(r['course'],r['course'])}{stream}\n📖 Semester {r['semester']}\n📝 {r['subject']}\n💰 Price: ⭐ {r['price']} Stars\n📄 PDF available"
-    kb = [[InlineKeyboardButton("💳 Buy Now",callback_data=f"buy:{pid}")]]
+    text = f"📚 {COURSES.get(r['course'],r['course'])}{stream}\n📖 Semester {r['semester']}\n📝 {r['subject']}\n💰 Price: ₹{r['price']}\n📄 PDF available"
+    kb = []
+    kb.append([InlineKeyboardButton("👀 4-Page Free Demo",callback_data=f"demo:{pid}")])
+    kb.append([InlineKeyboardButton("💳 Buy Now",callback_data=f"buy:{pid}")])
     if ADMIN_USERNAME:
         kb.append([InlineKeyboardButton("📩 Admin से संपर्क करें",url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")])
     kb.append([InlineKeyboardButton("⬅️ Back",callback_data=f"sem:{r['course']}:{r['stream']}:{r['semester']}")])
     await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
+
+async def send_demo(q, pid, context):
+    """Send the first 4 pages of a PDF as a free demo."""
+    with db() as c:
+        p = c.execute("SELECT * FROM products WHERE id=? AND active=1 AND file_id<>''",(pid,)).fetchone()
+    if not p:
+        await q.answer("PDF अभी उपलब्ध नहीं है।", show_alert=True)
+        return
+    if p["preview_file_id"]:
+        await q.message.reply_document(
+            p["preview_file_id"],
+            caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {DEMO_PAGES} pages\n💡 पसंद आए तो Buy Now करें।"
+        )
+        return
+    await q.answer("📄 Demo तैयार किया जा रहा है…")
+    temp_pdf = None
+    temp_demo = None
+    try:
+        from pypdf import PdfReader, PdfWriter
+        tg_file = await context.bot.get_file(p["file_id"])
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as src:
+            temp_pdf = src.name
+        await tg_file.download_to_drive(temp_pdf)
+        reader = PdfReader(temp_pdf)
+        total = len(reader.pages)
+        if total == 0:
+            await q.message.reply_text("इस PDF में कोई page नहीं मिला।")
+            return
+        writer = PdfWriter()
+        for page in reader.pages[:DEMO_PAGES]:
+            writer.add_page(page)
+        with tempfile.NamedTemporaryFile(suffix="_demo.pdf", delete=False) as out:
+            temp_demo = out.name
+        with open(temp_demo, "wb") as fh:
+            writer.write(fh)
+        sent = await q.message.reply_document(
+            FSInputFile(temp_demo, filename=f"{p['subject']}_Free_Demo.pdf"),
+            caption=f"👀 Free Demo — {p['subject']}\n📄 पहले {min(DEMO_PAGES,total)} pages\n💡 Notes पसंद आए तो वापस जाकर Buy Now करें।"
+        )
+        if sent.document:
+            with db() as c:
+                c.execute("UPDATE products SET preview_file_id=? WHERE id=?",(sent.document.file_id,pid))
+    except Exception:
+        log.exception("demo generation failed for product %s", pid)
+        await q.message.reply_text("❌ Demo PDF तैयार नहीं हो सकी। Admin से PDF दोबारा upload करवाएं।")
+    finally:
+        for path in (temp_pdf, temp_demo):
+            if path:
+                try: os.remove(path)
+                except OSError: pass
 
 async def buy(q, pid):
     with db() as c:
@@ -407,9 +464,15 @@ async def admin_document(update, context):
     if not update.message.document: return
     if update.message.document.mime_type not in ("application/pdf","application/octet-stream") and not update.message.document.file_name.lower().endswith(".pdf"):
         await update.message.reply_text("कृपया PDF document भेजें।"); return
-    with db() as c: c.execute("UPDATE products SET file_id=? WHERE id=?",(update.message.document.file_id,pid))
+    with db() as c:
+        c.execute("UPDATE products SET file_id=?,preview_file_id='' WHERE id=?",
+                  (update.message.document.file_id,pid))
     context.user_data.clear()
-    await update.message.reply_text(f"✅ Product #{pid} की PDF upload हो गई।",reply_markup=admin_menu())
+    await update.message.reply_text(
+        f"✅ Product #{pid} की PDF upload हो गई।\n\n"
+        f"👀 Free Demo: पहले {DEMO_PAGES} pages\n"
+        "Student को Subject खोलते ही 4-Page Free Demo button दिखेगा।",
+        reply_markup=admin_menu())
 
 async def latest_notes(q):
     with db() as c:
@@ -627,6 +690,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d.startswith("sem:"):
         _,course,stream,sem=d.split(":"); await subjects(q,course,stream,sem); return
     if d.startswith("prod:"): await show_product(q,int(d.split(":")[1])); return
+    if d.startswith("demo:"):
+        await send_demo(q,int(d.split(":")[1]),context)
+        return
     if d.startswith("missing:"):
         _,course,stream,sem=d.split(":"); await show_missing(q,course,stream,int(sem)); return
     if d.startswith("bundle:"):
