@@ -88,9 +88,9 @@ def main_menu():
 
 def admin_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Users",callback_data="adm:users"), InlineKeyboardButton("📚 Products / Notes",callback_data="adm:products")],
-        [InlineKeyboardButton("➕ Add Subject",callback_data="adm:add"), InlineKeyboardButton("🧾 Subject Catalog",callback_data="adm:catalog")],
-        [InlineKeyboardButton("📄 Upload PDF",callback_data="adm:upload"), InlineKeyboardButton("💰 Change Price",callback_data="adm:price")],
+        [InlineKeyboardButton("👤 Users",callback_data="adm:users"), InlineKeyboardButton("📚 Manage Notes",callback_data="adm:products")],
+        [InlineKeyboardButton("➕ Add New Note",callback_data="adm:add"), InlineKeyboardButton("🧾 Subject Catalog",callback_data="adm:catalog")],
+        [InlineKeyboardButton("📄 Upload / Replace PDF",callback_data="adm:upload"), InlineKeyboardButton("💰 Change Price",callback_data="adm:price")],
         [InlineKeyboardButton("📦 Orders",callback_data="adm:orders"), InlineKeyboardButton("📊 Sales",callback_data="adm:sales")],
         [InlineKeyboardButton("📢 Broadcast",callback_data="adm:broadcast"), InlineKeyboardButton("⚙️ Settings",callback_data="adm:settings")]
     ])
@@ -282,17 +282,60 @@ async def purchases(q):
     kb.append([InlineKeyboardButton("⬅️ Main Menu",callback_data="home")])
     await q.edit_message_text(text,reply_markup=InlineKeyboardMarkup(kb))
 
+def admin_course_buttons(prefix="adducourse"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎓 B.Sc.",callback_data=f"{prefix}:BSC"), InlineKeyboardButton("📗 B.Com",callback_data=f"{prefix}:BCOM")],
+        [InlineKeyboardButton("📙 M.Com",callback_data=f"{prefix}:MCOM"), InlineKeyboardButton("🔬 M.Sc",callback_data=f"{prefix}:MSC")],
+        [InlineKeyboardButton("📕 M.A",callback_data=f"{prefix}:MA"), InlineKeyboardButton("📘 B.A",callback_data=f"{prefix}:BA")],
+        [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
+    ])
+
+def admin_semester_buttons(prefix, course, stream):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1️⃣",callback_data=f"{prefix}:{course}:{stream}:1"), InlineKeyboardButton("2️⃣",callback_data=f"{prefix}:{course}:{stream}:2"), InlineKeyboardButton("3️⃣",callback_data=f"{prefix}:{course}:{stream}:3")],
+        [InlineKeyboardButton("4️⃣",callback_data=f"{prefix}:{course}:{stream}:4"), InlineKeyboardButton("5️⃣",callback_data=f"{prefix}:{course}:{stream}:5"), InlineKeyboardButton("6️⃣",callback_data=f"{prefix}:{course}:{stream}:6")],
+        [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
+    ])
+
+def admin_price_buttons(prefix, pid):
+    prices=[20,29,49,50,79,99,149,199,299]
+    rows=[]
+    for i in range(0,len(prices),3):
+        rows.append([InlineKeyboardButton(f"₹{p}",callback_data=f"{prefix}:{pid}:{p}") for p in prices[i:i+3]])
+    rows.append([InlineKeyboardButton("✏️ Custom Price",callback_data=f"admpricecustom:{pid}")])
+    rows.append([InlineKeyboardButton("❌ Cancel",callback_data="adm:home")])
+    return InlineKeyboardMarkup(rows)
+
 async def admin_add_start(q, context):
+    context.user_data.clear()
     context.user_data["admin_action"]="add_course"
-    await q.edit_message_text("➕ Add Subject\nCourse भेजें: BSC / BCOM / MCOM / MSC / MA / BA\n\n/cancel से रद्द करें।")
+    await q.edit_message_text("➕ Add New Note\n\nपहले Course चुनें:",reply_markup=admin_course_buttons())
 
 async def admin_upload_start(q, context):
-    context.user_data["admin_action"]="upload_id"
-    await q.edit_message_text("📄 PDF Upload\nपहले Product ID भेजें, फिर उसी के बाद PDF Document भेजें।\n\n/cancel से रद्द करें।")
+    context.user_data.clear()
+    with db() as c:
+        rows=c.execute("SELECT id,subject,semester,price,file_id FROM products WHERE active=1 ORDER BY id DESC LIMIT 30").fetchall()
+    if not rows:
+        await q.edit_message_text("📄 अभी कोई Product नहीं है। पहले ➕ Add New Note करें.",reply_markup=admin_menu()); return
+    kb=[]
+    for r in rows:
+        status="✅ PDF" if r["file_id"] else "⚠️ PDF बाकी"
+        kb.append([InlineKeyboardButton(f"#{r['id']} • {r['subject'][:28]} • S{r['semester']} • {status}",callback_data=f"admupload:{r['id']}")])
+    kb.append([InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")])
+    await q.edit_message_text("📄 Upload / Replace PDF\n\nजिस Note में PDF लगानी है, उसे चुनें:",reply_markup=InlineKeyboardMarkup(kb))
 
 async def admin_price_start(q, context):
-    context.user_data["admin_action"]="price"
-    await q.edit_message_text("💰 Product ID और नई price इस format में भेजें:\n123 50\n\n/cancel से रद्द करें।")
+    context.user_data.clear()
+    with db() as c:
+        rows=c.execute("SELECT id,subject,semester,price,file_id FROM products WHERE active=1 ORDER BY id DESC LIMIT 30").fetchall()
+    if not rows:
+        await q.edit_message_text("💰 अभी कोई Product नहीं है। पहले ➕ Add New Note करें.",reply_markup=admin_menu()); return
+    kb=[]
+    for r in rows:
+        status="📄" if r["file_id"] else "⚠️"
+        kb.append([InlineKeyboardButton(f"#{r['id']} • {r['subject'][:30]} • S{r['semester']} • ₹{r['price']} {status}",callback_data=f"admprice:{r['id']}")])
+    kb.append([InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")])
+    await q.edit_message_text("💰 Change Price\n\nजिस Note की price बदलनी है, उसे चुनें:",reply_markup=InlineKeyboardMarkup(kb))
 
 async def admin_broadcast_start(q, context):
     context.user_data["admin_action"]="broadcast"
@@ -304,74 +347,46 @@ async def admin_text(update, context):
     if not action: return
     text=(update.message.text or "").strip()
 
-    if action=="add_course":
-        course=text.upper()
-        if course not in COURSES:
-            await update.message.reply_text("गलत Course. BSC/BCOM/MCOM/MSC/MA/BA भेजें।"); return
-        context.user_data.update(admin_action="add_stream",course=course)
-        await update.message.reply_text("Stream भेजें। केवल B.Sc. के लिए PCM या PCB; बाकी में NONE भेजें।")
-        return
-    if action=="add_stream":
-        stream=text.upper()
-        course=context.user_data["course"]
-        if course=="BSC" and stream not in STREAMS:
-            await update.message.reply_text("B.Sc. के लिए PCM या PCB भेजें।"); return
-        if course!="BSC": stream=""
-        context.user_data.update(admin_action="add_semester",stream=stream)
-        await update.message.reply_text("Semester 1 से 6 में कोई एक भेजें।")
-        return
-    if action=="add_semester":
-        if text not in [str(i) for i in range(1,7)]:
-            await update.message.reply_text("Semester 1 से 6 में कोई एक भेजें।"); return
-        context.user_data.update(admin_action="add_subject",semester=int(text))
-        await update.message.reply_text("Subject का नाम भेजें।")
-        return
     if action=="add_subject":
+        if not text:
+            await update.message.reply_text("Subject का नाम खाली नहीं हो सकता।"); return
         context.user_data.update(admin_action="add_price",subject=text)
-        await update.message.reply_text("Price Stars में भेजें। उदाहरण: 50")
+        await update.message.reply_text(f"📝 Subject: {text}\n\nअब नीचे price चुनें:",reply_markup=admin_price_buttons("adduprice",0))
         return
+
     if action=="add_price":
         try: price=int(text); assert price>0
-        except: await update.message.reply_text("Price केवल positive number में भेजें।"); return
+        except:
+            await update.message.reply_text("Price केवल positive number में भेजें।"); return
         d=context.user_data
         with db() as c:
             c.execute("""INSERT INTO subject_catalog(course,stream,semester,subject,active)
-                         VALUES(?,?,?,?,1)
-                         ON CONFLICT(course,stream,semester,subject)
-                         DO UPDATE SET active=1""",
+                         VALUES(?,?,?,?,1) ON CONFLICT(course,stream,semester,subject) DO UPDATE SET active=1""",
                       (d["course"],d["stream"],d["semester"],d["subject"]))
             c.execute("""INSERT INTO products(course,stream,semester,subject,price,file_id,active,created_at)
-                         VALUES(?,?,?,?,?,'',1,?)
-                         ON CONFLICT(course,stream,semester,subject)
-                         DO UPDATE SET price=excluded.price, active=1""",
+                         VALUES(?,?,?,?,?,'',1,?) ON CONFLICT(course,stream,semester,subject)
+                         DO UPDATE SET price=excluded.price,active=1""",
                       (d["course"],d["stream"],d["semester"],d["subject"],price,now()))
-            p=c.execute("""SELECT id FROM products
-                           WHERE course=? AND stream=? AND semester=? AND subject=?""",
+            p=c.execute("SELECT id FROM products WHERE course=? AND stream=? AND semester=? AND subject=?",
                         (d["course"],d["stream"],d["semester"],d["subject"])).fetchone()
-        context.user_data.update(admin_action="upload_pdf",product_id=int(p["id"]))
-        await update.message.reply_text(
-            f"✅ Subject/Product save हो गया।\nProduct ID: #{p['id']}\n\nअब इसी chat में PDF को Document के रूप में भेजें।\nPDF upload होते ही Student के लिए Buy Now और payment चालू हो जाएगा.",
-            reply_markup=admin_menu())
+        pid=int(p["id"])
+        context.user_data.update(admin_action="upload_pdf",product_id=pid)
+        await update.message.reply_text(f"✅ Note तैयार है!\n\n📝 {d['subject']}\n💰 Price: ₹{price}\n🆔 Product ID: #{pid}\n\nअब PDF को Document के रूप में भेजें।",
+                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]]))
         return
-    if action=="upload_id":
-        if not text.isdigit():
-            await update.message.reply_text("Product ID number भेजें।"); return
+
+    if action=="price_custom":
+        try: price=int(text); assert price>0
+        except:
+            await update.message.reply_text("Price केवल positive number में भेजें।"); return
+        pid=int(context.user_data["product_id"])
         with db() as c:
-            p=c.execute("SELECT id,subject FROM products WHERE id=?",(int(text),)).fetchone()
-        if not p:
-            await update.message.reply_text("Product ID नहीं मिला।"); return
-        context.user_data.update(admin_action="upload_pdf",product_id=int(text))
-        await update.message.reply_text(f"अब Product #{text} ({p['subject']}) की PDF Document के रूप में भेजें।")
-        return
-    if action=="price":
-        parts=text.split()
-        if len(parts)!=2 or not all(x.isdigit() for x in parts):
-            await update.message.reply_text("Format: ProductID Price\nउदाहरण: 123 50"); return
-        pid,price=map(int,parts)
-        with db() as c: c.execute("UPDATE products SET price=? WHERE id=?",(price,pid))
+            p=c.execute("SELECT subject FROM products WHERE id=? AND active=1",(pid,)).fetchone()
+            if p: c.execute("UPDATE products SET price=? WHERE id=?",(price,pid))
         context.user_data.clear()
-        await update.message.reply_text("✅ Price update हो गई।",reply_markup=admin_menu())
+        await update.message.reply_text(f"✅ Price update हो गई!\n💰 नई Price: ₹{price}",reply_markup=admin_menu())
         return
+
     if action=="broadcast":
         context.user_data.clear()
         with db() as c: users=c.execute("SELECT telegram_id FROM users").fetchall()
@@ -496,6 +511,107 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="featured": await featured_notes(q); return
     if d=="request": await request_notes(q); return
     if d=="search": await search_prompt(q,context); return
+
+    if d.startswith("adducourse:") and admin_only(q.from_user.id):
+        course=d.split(":")[1]
+        context.user_data.clear()
+        context.user_data["course"]=course
+        if course=="BSC":
+            context.user_data["admin_action"]="add_stream"
+            await q.edit_message_text("➕ Add New Note\n\nB.Sc. Stream चुनें:",reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧪 PCM",callback_data="addustream:BSC:PCM"),InlineKeyboardButton("🧬 PCB",callback_data="addustream:BSC:PCB")],
+                [InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]
+            ]))
+        else:
+            context.user_data.update(admin_action="add_semester",stream="")
+            await q.edit_message_text("➕ Add New Note\n\nSemester चुनें:",reply_markup=admin_semester_buttons("addsem",course,""))
+        return
+
+    if d.startswith("addustream:") and admin_only(q.from_user.id):
+        _,course,stream=d.split(":")
+        context.user_data.update(admin_action="add_semester",course=course,stream=stream)
+        await q.edit_message_text(f"➕ Add New Note\n\n{stream} → Semester चुनें:",reply_markup=admin_semester_buttons("addsem",course,stream))
+        return
+
+    if d.startswith("addsem:") and admin_only(q.from_user.id):
+        _,course,stream,sem=d.split(":")
+        context.user_data.update(admin_action="add_subject",course=course,stream=stream,semester=int(sem))
+        await q.edit_message_text(f"➕ Add New Note\n\n📚 {COURSES.get(course,course)}{' / '+stream if stream else ''} • Semester {sem}\n\nअब Subject का नाम message में लिखें:",
+                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]]))
+        return
+
+    if d.startswith("adduprice:") and admin_only(q.from_user.id):
+        _,pid,price=d.split(":")
+        if int(pid)!=0: return
+        context.user_data["selected_price"]=int(price)
+        await q.edit_message_text(f"💰 Selected Price: ₹{price}\n\nअब Confirm करें:",
+                                    reply_markup=InlineKeyboardMarkup([
+                                        [InlineKeyboardButton(f"✅ Confirm ₹{price}",callback_data=f"adduconfirm:{price}")],
+                                        [InlineKeyboardButton("⬅️ Back",callback_data="adm:add")]
+                                    ]))
+        return
+
+    if d.startswith("adduconfirm:") and admin_only(q.from_user.id):
+        price=int(d.split(":")[1])
+        dct=context.user_data
+        if not all(k in dct for k in ("course","stream","semester","subject")):
+            context.user_data.clear()
+            await q.edit_message_text("Session expired. फिर से ➕ Add New Note करें.",reply_markup=admin_menu()); return
+        with db() as c:
+            c.execute("""INSERT INTO subject_catalog(course,stream,semester,subject,active)
+                         VALUES(?,?,?,?,1) ON CONFLICT(course,stream,semester,subject) DO UPDATE SET active=1""",
+                      (dct["course"],dct["stream"],dct["semester"],dct["subject"]))
+            c.execute("""INSERT INTO products(course,stream,semester,subject,price,file_id,active,created_at)
+                         VALUES(?,?,?,?,?,'',1,?) ON CONFLICT(course,stream,semester,subject)
+                         DO UPDATE SET price=excluded.price,active=1""",
+                      (dct["course"],dct["stream"],dct["semester"],dct["subject"],price,now()))
+            p=c.execute("SELECT id FROM products WHERE course=? AND stream=? AND semester=? AND subject=?",
+                        (dct["course"],dct["stream"],dct["semester"],dct["subject"])).fetchone()
+        pid=int(p["id"])
+        context.user_data.update(admin_action="upload_pdf",product_id=pid)
+        await q.edit_message_text(f"✅ Note तैयार है!\n\n📝 {dct['subject']}\n💰 Price: ₹{price}\n🆔 Product ID: #{pid}\n\nअब PDF को Document के रूप में भेजें.",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]]))
+        return
+
+    if d.startswith("admupload:") and admin_only(q.from_user.id):
+        pid=int(d.split(":")[1])
+        with db() as c:
+            p=c.execute("SELECT id,subject,price FROM products WHERE id=? AND active=1",(pid,)).fetchone()
+        if not p:
+            await q.answer("Product नहीं मिला।",show_alert=True); return
+        context.user_data.update(admin_action="upload_pdf",product_id=pid)
+        await q.edit_message_text(f"📄 Upload PDF\n\n🆔 Product #{pid}\n📝 {p['subject']}\n💰 Price: ₹{p['price']}\n\nअब PDF को Document के रूप में भेजें.",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ PDF List",callback_data="adm:upload")],[InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]]))
+        return
+
+    if d.startswith("admprice:") and admin_only(q.from_user.id):
+        pid=int(d.split(":")[1])
+        with db() as c:
+            p=c.execute("SELECT id,subject,price FROM products WHERE id=? AND active=1",(pid,)).fetchone()
+        if not p:
+            await q.answer("Product नहीं मिला।",show_alert=True); return
+        await q.edit_message_text(f"💰 Change Price\n\n🆔 Product #{pid}\n📝 {p['subject']}\n💰 Current: ₹{p['price']}\n\nनई price चुनें:",
+                                  reply_markup=admin_price_buttons("admpricev",pid))
+        return
+
+    if d.startswith("admpricev:") and admin_only(q.from_user.id):
+        _,pid,price=d.split(":")
+        pid=int(pid); price=int(price)
+        with db() as c:
+            p=c.execute("SELECT subject FROM products WHERE id=? AND active=1",(pid,)).fetchone()
+            if p: c.execute("UPDATE products SET price=? WHERE id=?",(price,pid))
+        if not p:
+            await q.answer("Product नहीं मिला।",show_alert=True); return
+        await q.edit_message_text(f"✅ Price update हो गई!\n\n📝 {p['subject']}\n💰 नई Price: ₹{price}",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Change Another Price",callback_data="adm:price")],[InlineKeyboardButton("⬅️ Admin Panel",callback_data="adm:home")]]))
+        return
+
+    if d.startswith("admpricecustom:") and admin_only(q.from_user.id):
+        pid=int(d.split(":")[1])
+        context.user_data.update(admin_action="price_custom",product_id=pid)
+        await q.edit_message_text(f"✏️ Custom Price\n\nProduct #{pid}\nनई price number में भेजें।\nउदाहरण: 75",
+                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="adm:home")]]))
+        return
     if d.startswith("course:"): await choose_course(q,d.split(":")[1]); return
     if d.startswith("stream:"):
         _,course,stream=d.split(":"); await choose_semester(q,course,stream); return
