@@ -137,6 +137,82 @@ def payment_buttons(order_id, short_url, bundle=False):
     ])
 
 
+async def poll_razorpay_orders(context):
+    """Automatically verify paid Razorpay links and deliver purchased PDFs."""
+    if not razorpay_enabled():
+        return
+    try:
+        with db() as c:
+            orders = c.execute(
+                """SELECT o.id,o.telegram_id,o.price,o.payment_link_id,p.file_id,p.subject
+                   FROM orders o JOIN products p ON p.id=o.product_id
+                   WHERE o.status='PENDING' AND o.payment_link_id<>'' AND p.active=1
+                   ORDER BY o.id ASC LIMIT 25"""
+            ).fetchall()
+            bundles = c.execute(
+                """SELECT * FROM bundle_orders
+                   WHERE status='PENDING' AND payment_link_id<>''
+                   ORDER BY id ASC LIMIT 10"""
+            ).fetchall()
+
+        for o in orders:
+            try:
+                data = await fetch_payment_link(o["payment_link_id"])
+                paid = int(data.get("amount_paid", 0) or 0)
+                if str(data.get("status", "")).lower() == "paid" and paid >= int(o["price"]) * 100:
+                    with db() as c:
+                        cur = c.execute(
+                            """UPDATE orders SET status='PAID',razorpay_payment_id=?
+                               WHERE id=? AND status='PENDING'""",
+                            (str(data.get("id", "")), o["id"])
+                        )
+                        changed = cur.rowcount
+                    if changed and o["file_id"]:
+                        await context.bot.send_document(
+                            chat_id=o["telegram_id"],
+                            document=o["file_id"],
+                            caption=f"✅ Payment Verified\n📚 {o['subject']}\n💰 ₹{o['price']}\n📥 आपकी Notes PDF"
+                        )
+                        with db() as c:
+                            c.execute("UPDATE orders SET delivered=1 WHERE id=? AND delivered=0", (o["id"],))
+            except Exception:
+                log.exception("Razorpay order polling failed for order %s", o["id"])
+
+        for b in bundles:
+            try:
+                data = await fetch_payment_link(b["payment_link_id"])
+                paid = int(data.get("amount_paid", 0) or 0)
+                if str(data.get("status", "")).lower() == "paid" and paid >= int(b["price"]) * 100:
+                    with db() as c:
+                        cur = c.execute(
+                            """UPDATE bundle_orders SET status='PAID',razorpay_payment_id=?
+                               WHERE id=? AND status='PENDING'""",
+                            (str(data.get("id", "")), b["id"])
+                        )
+                        changed = cur.rowcount
+                        rows = c.execute(
+                            """SELECT * FROM products
+                               WHERE course=? AND stream=? AND semester=? AND active=1 AND file_id<>''
+                               ORDER BY subject"""
+                            , (b["course"], b["stream"], b["semester"])
+                        ).fetchall()
+                    if changed:
+                        await context.bot.send_message(
+                            chat_id=b["telegram_id"],
+                            text=f"✅ Payment Verified\n📦 Semester {b['semester']} Pack\n💰 ₹{b['price']}\n📥 आपकी Notes PDFs:"
+                        )
+                        for p in rows:
+                            await context.bot.send_document(
+                                chat_id=b["telegram_id"],
+                                document=p["file_id"],
+                                caption=f"📚 {p['subject']}"
+                            )
+                        with db() as c:
+                            c.execute("UPDATE bundle_orders SET delivered=1 WHERE id=? AND delivered=0", (b["id"],))
+            except Exception:
+                log.exception("Razorpay bundle polling failed for bundle %s", b["id"])
+
+
 async def deliver_note(q, order_id):
     with db() as c:
         r=c.execute("""SELECT o.status,o.delivered,p.file_id,p.subject,p.price
@@ -736,7 +812,7 @@ async def help_menu(q):
         "❓ RU Notes Store — Help\n\n"
         "1️⃣ Course → Semester → Subject चुनें।\n"
         "2️⃣ उपलब्ध Notes खोलें।\n"
-        "3️⃣ Buy Now दबाकर Telegram Stars से payment करें।\n"
+        "3️⃣ Buy Now दबाकर Razorpay से UPI / Card payment करें।\n"
         "4️⃣ Payment successful होने पर PDF Telegram में automatically मिलेगा।\n\n"
         "📩 Notes नहीं मिल रहे हों तो Request Notes से Admin को बताएं।"
     )
@@ -1077,7 +1153,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❓ RU Notes Store — Help\n\n"
         "Course → Semester → Subject चुनें।\n"
         "Available PDF खोलें → Buy Now → Telegram Stars से payment करें।\n"
-        "Payment verify होने पर PDF Telegram में मिलेगा.",
+        "Payment successful होने पर bot payment verify करके PDF Telegram में भेज देगा.",
         reply_markup=main_menu())
 
 async def post_init(app):
@@ -1111,6 +1187,8 @@ def main():
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
+    if app.job_queue:
+        app.job_queue.run_repeating(poll_razorpay_orders, interval=20, first=10, name="razorpay-payment-poller")
     app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
     # Admin text handler must come before the generic student text handler.
     # In python-telegram-bot, the first matching handler in a group handles the update.
