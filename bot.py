@@ -93,10 +93,24 @@ def db():
     for col in ("payment_link_id","razorpay_payment_id"):
         if col not in order_cols:
             c.execute(f"ALTER TABLE orders ADD COLUMN {col} TEXT DEFAULT ''")
+    for col, definition in (
+        ("approval_notified", "INTEGER NOT NULL DEFAULT 0"),
+        ("approved_at", "TEXT DEFAULT ''"),
+        ("delivered_at", "TEXT DEFAULT ''"),
+    ):
+        if col not in order_cols:
+            c.execute(f"ALTER TABLE orders ADD COLUMN {col} {definition}")
     bundle_cols=[r["name"] for r in c.execute("PRAGMA table_info(bundle_orders)").fetchall()]
     for col in ("payment_link_id","razorpay_payment_id"):
         if col not in bundle_cols:
             c.execute(f"ALTER TABLE bundle_orders ADD COLUMN {col} TEXT DEFAULT ''")
+    for col, definition in (
+        ("approval_notified", "INTEGER NOT NULL DEFAULT 0"),
+        ("approved_at", "TEXT DEFAULT ''"),
+        ("delivered_at", "TEXT DEFAULT ''"),
+    ):
+        if col not in bundle_cols:
+            c.execute(f"ALTER TABLE bundle_orders ADD COLUMN {col} {definition}")
     seed_catalog(c)
     c.commit()
     return c
@@ -1235,8 +1249,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ RU Notes Store — Help\n\n"
         "Course → Semester → Subject चुनें।\n"
-        "Available PDF खोलें → Buy Now → Telegram Stars से payment करें।\n"
-        "Payment successful होने पर bot payment verify करके PDF Telegram में भेज देगा.",
+        "Available PDF खोलें → Buy Now → Payment Page पर UPI QR/UPI ID से payment करें।\n"
+        "Payment करने के बाद “मैंने Payment कर दिया” दबाएँ। Admin UPI transaction verify करेगा और approval के बाद PDF Telegram में भेजी जाएगी.",
         reply_markup=main_menu())
 
 async def post_init(app):
@@ -1270,8 +1284,6 @@ def main():
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("cancel",cancel))
     app.add_handler(CallbackQueryHandler(callback))
-    if app.job_queue:
-        app.job_queue.run_repeating(poll_razorpay_orders, interval=20, first=10, name="razorpay-payment-poller")
     app.add_handler(MessageHandler(filters.Document.ALL,admin_document))
     # Admin text handler must come before the generic student text handler.
     # In python-telegram-bot, the first matching handler in a group handles the update.
