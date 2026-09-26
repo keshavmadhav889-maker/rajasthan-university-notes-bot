@@ -278,47 +278,121 @@ async def notify_manual_payment(context, order_id, bundle=False):
     with db() as c:
         if bundle:
             row=c.execute("SELECT * FROM bundle_orders WHERE id=?",(order_id,)).fetchone()
-            if not row or row["approval_notified"]: return
-            text=f"🟠 Payment Approval Required\\n\\n📦 Semester {row['semester']} Complete Pack\\n👤 User ID: {row['telegram_id']}\\n💰 ₹{row['price']}\\n🧾 Order #{order_id}\\n\\nStudent ने payment report किया है। अपने UPI transaction में payment देखकर approve करें।"
+            if not row or row["approval_notified"]:
+                return
+            text=(
+                f"🟠 Payment Approval Required\n\n"
+                f"📦 Semester {row['semester']} Complete Pack\n"
+                f"👤 User ID: {row['telegram_id']}\n"
+                f"💰 ₹{row['price']}\n"
+                f"🧾 Order #{order_id}\n\n"
+                "Student ने payment report किया है। अपने UPI transaction में payment देखकर approve करें।"
+            )
         else:
-            row=c.execute("SELECT o.*,p.subject FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?",(order_id,)).fetchone()
-            if not row or row["approval_notified"]: return
-            text=f"🟠 Payment Approval Required\\n\\n📚 {row['subject']}\\n👤 User ID: {row['telegram_id']}\\n💰 ₹{row['price']}\\n🧾 Order #{order_id}\\n\\nStudent ने payment report किया है। अपने UPI transaction में payment देखकर approve करें।"
+            row=c.execute(
+                "SELECT o.*,p.subject FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?",
+                (order_id,)
+            ).fetchone()
+            if not row or row["approval_notified"]:
+                return
+            text=(
+                f"🟠 Payment Approval Required\n\n"
+                f"📚 {row['subject']}\n"
+                f"👤 User ID: {row['telegram_id']}\n"
+                f"💰 ₹{row['price']}\n"
+                f"🧾 Order #{order_id}\n\n"
+                "Student ने payment report किया है। अपने UPI transaction में payment देखकर approve करें।"
+            )
         c.execute(f"UPDATE {table} SET approval_notified=1 WHERE id=?",(order_id,))
-    a="approvebundle" if bundle else "approveorder"; r="rejectbundle" if bundle else "rejectorder"
-    await context.bot.send_message(chat_id=ADMIN_CHAT_ID,text=text,reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve & Deliver PDF",callback_data=f"{a}:{order_id}")],[InlineKeyboardButton("❌ Reject Payment",callback_data=f"{r}:{order_id}")]]))
+    a="approvebundle" if bundle else "approveorder"
+    r="rejectbundle" if bundle else "rejectorder"
+    await context.bot.send_message(
+        chat_id=ADMIN_CHAT_ID,
+        text=text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Approve & Deliver PDF",callback_data=f"{a}:{order_id}")],
+            [InlineKeyboardButton("❌ Reject Payment",callback_data=f"{r}:{order_id}")]
+        ])
+    )
+
 
 async def report_manual_payment(update, context, order_id):
-    try: oid=int(order_id)
-    except: return False
+    try:
+        oid=int(order_id)
+    except:
+        return False
     uid=update.effective_user.id
     with db() as c:
         o=c.execute("SELECT id,status,telegram_id FROM orders WHERE id=?",(oid,)).fetchone()
         b=c.execute("SELECT id,status,telegram_id FROM bundle_orders WHERE id=?",(oid,)).fetchone()
         if o and o["telegram_id"]==uid:
-            if o["status"]=="PENDING": c.execute("UPDATE orders SET status='PAYMENT_REPORTED' WHERE id=? AND status='PENDING'",(oid,))
+            if o["status"]=="PENDING":
+                c.execute("UPDATE orders SET status='PAYMENT_REPORTED' WHERE id=? AND status='PENDING'",(oid,))
             bundle=False
         elif b and b["telegram_id"]==uid:
-            if b["status"]=="PENDING": c.execute("UPDATE bundle_orders SET status='PAYMENT_REPORTED' WHERE id=? AND status='PENDING'",(oid,))
+            if b["status"]=="PENDING":
+                c.execute("UPDATE bundle_orders SET status='PAYMENT_REPORTED' WHERE id=? AND status='PENDING'",(oid,))
             bundle=True
-        else: return False
+        else:
+            return False
     await notify_manual_payment(context,oid,bundle)
-    await update.message.reply_text("✅ Payment report मिल गया।\\n\\n🕐 Admin आपके UPI transaction को देखकर approval करेगा। Approval के बाद PDF इसी Telegram chat में भेज दी जाएगी।",reply_markup=main_menu())
+    await update.message.reply_text(
+        "✅ Payment report मिल गया.\n\n"
+        "🕐 Admin आपके UPI transaction को देखकर approval करेगा. "
+        "Approval के बाद PDF इसी Telegram chat में भेज दी जाएगी.",
+        reply_markup=main_menu()
+    )
     return True
+
 
 async def approve_manual_order(update, context, oid):
     q=update.callback_query
     with db() as c:
-        o=c.execute("SELECT o.*,p.subject,p.file_id FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?",(oid,)).fetchone()
-        if not o or o["status"]!="PAYMENT_REPORTED": await q.answer("यह order approval के लिए pending नहीं है।",show_alert=True); return
-        if not o["file_id"]: await q.answer("इस order की PDF उपलब्ध नहीं है।",show_alert=True); return
-        c.execute("UPDATE orders SET status='PAID',approved_at=? WHERE id=? AND status='PAYMENT_REPORTED'",(now(),oid))
+        o=c.execute(
+            """SELECT o.*,p.subject,p.file_id
+               FROM orders o JOIN products p ON p.id=o.product_id
+               WHERE o.id=?""",
+            (oid,)
+        ).fetchone()
+        if not o or o["status"]!="PAYMENT_REPORTED":
+            await q.answer("यह order approval के लिए pending नहीं है।",show_alert=True)
+            return
+        if not o["file_id"]:
+            await q.answer("इस order की PDF उपलब्ध नहीं है।",show_alert=True)
+            return
+
+    caption=(
+        f"✅ Payment Approved\n"
+        f"📚 {o['subject']}\n"
+        f"💰 ₹{o['price']}\n"
+        f"📥 आपकी Notes PDF"
+    )
     try:
-        await context.bot.send_document(chat_id=o["telegram_id"],document=o["file_id"],caption=f"✅ Payment Approved\\n📚 {o['subject']}\\n💰 ₹{o['price']}\\n📥 आपकी Notes PDF")
-        with db() as c: c.execute("UPDATE orders SET delivered=1,delivered_at=? WHERE id=?",(now(),oid))
-        await q.edit_message_text(f"✅ Order #{oid} approved और PDF deliver हो गई।")
-    except Exception:
-        log.exception("manual delivery failed"); await q.edit_message_text(f"⚠️ Order #{oid} approved है, लेकिन PDF delivery fail हुई।")
+        await send_manual_pdf(
+            context,
+            o["telegram_id"],
+            o["file_id"],
+            caption,
+            filename=f"{o['subject']}.pdf"
+        )
+    except Exception as e:
+        log.exception("manual delivery failed for order #%s", oid)
+        await q.edit_message_text(
+            f"⚠️ Order #{oid} approve नहीं हुआ क्योंकि PDF delivery fail हुई।\n\n"
+            f"Order अभी Approval Queue में रखा गया है।\n"
+            f"Error: {str(e)[:500]}"
+        )
+        return
+
+    with db() as c:
+        c.execute(
+            """UPDATE orders
+               SET status='PAID', approved_at=?, delivered=1, delivered_at=?
+               WHERE id=? AND status='PAYMENT_REPORTED'""",
+            (now(), now(), oid)
+        )
+    await q.edit_message_text(f"✅ Order #{oid} approved और PDF successfully deliver हो गई।")
+
 
 async def reject_manual_order(update, context, oid):
     q=update.callback_query
@@ -333,17 +407,55 @@ async def approve_manual_bundle(update, context, bid):
     q=update.callback_query
     with db() as c:
         b=c.execute("SELECT * FROM bundle_orders WHERE id=?",(bid,)).fetchone()
-        if not b or b["status"]!="PAYMENT_REPORTED": await q.answer("यह Pack approval के लिए pending नहीं है।",show_alert=True); return
-        rows=c.execute("SELECT * FROM products WHERE course=? AND stream=? AND semester=? AND active=1 AND file_id<>'' ORDER BY subject",(b["course"],b["stream"],b["semester"])).fetchall()
-        if not rows: await q.answer("Pack की PDFs उपलब्ध नहीं हैं।",show_alert=True); return
-        c.execute("UPDATE bundle_orders SET status='PAID',approved_at=? WHERE id=? AND status='PAYMENT_REPORTED'",(now(),bid))
+        if not b or b["status"]!="PAYMENT_REPORTED":
+            await q.answer("यह Pack approval के लिए pending नहीं है।",show_alert=True)
+            return
+        rows=c.execute(
+            """SELECT * FROM products
+               WHERE course=? AND stream=? AND semester=? AND active=1 AND file_id<>''
+               ORDER BY subject""",
+            (b["course"],b["stream"],b["semester"])
+        ).fetchall()
+        if not rows:
+            await q.answer("Pack की PDFs उपलब्ध नहीं हैं।",show_alert=True)
+            return
+
     try:
-        await context.bot.send_message(chat_id=b["telegram_id"],text=f"✅ Payment Approved\\n📦 Semester {b['semester']} Complete Pack\\n💰 ₹{b['price']}\\n📥 आपकी Notes PDFs:")
-        for p in rows: await context.bot.send_document(chat_id=b["telegram_id"],document=p["file_id"],caption=f"📚 {p['subject']}")
-        with db() as c: c.execute("UPDATE bundle_orders SET delivered=1,delivered_at=? WHERE id=?",(now(),bid))
-        await q.edit_message_text(f"✅ Pack Order #{bid} approved और PDFs deliver हो गईं।")
-    except Exception:
-        log.exception("manual bundle delivery failed"); await q.edit_message_text(f"⚠️ Pack #{bid} approved है, लेकिन delivery पूरी नहीं हुई।")
+        await context.bot.send_message(
+            chat_id=b["telegram_id"],
+            text=(
+                f"✅ Payment Approved\n"
+                f"📦 Semester {b['semester']} Complete Pack\n"
+                f"💰 ₹{b['price']}\n"
+                f"📥 आपकी Notes PDFs:"
+            )
+        )
+        for p in rows:
+            await send_manual_pdf(
+                context,
+                b["telegram_id"],
+                p["file_id"],
+                f"📚 {p['subject']}",
+                filename=f"{p['subject']}.pdf"
+            )
+    except Exception as e:
+        log.exception("manual bundle delivery failed for bundle #%s", bid)
+        await q.edit_message_text(
+            f"⚠️ Pack #{bid} approve नहीं हुआ क्योंकि PDF delivery fail हुई।\n\n"
+            f"Bundle अभी Approval Queue में रखा गया है।\n"
+            f"Error: {str(e)[:500]}"
+        )
+        return
+
+    with db() as c:
+        c.execute(
+            """UPDATE bundle_orders
+               SET status='PAID', approved_at=?, delivered=1, delivered_at=?
+               WHERE id=? AND status='PAYMENT_REPORTED'""",
+            (now(), now(), bid)
+        )
+    await q.edit_message_text(f"✅ Pack Order #{bid} approved और सभी PDFs successfully deliver हो गईं।")
+
 
 async def reject_manual_bundle(update, context, bid):
     q=update.callback_query
