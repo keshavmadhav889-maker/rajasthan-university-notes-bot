@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RU Notes Store - Payment</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f4f7f5;margin:0;padding:18px;color:#123}
+.card{max-width:460px;margin:auto;background:#fff;border-radius:20px;padding:22px;box-shadow:0 8px 30px #0001;text-align:center}
+h1{margin:4px 0 8px}.amount{font-size:30px;font-weight:700;margin:12px}
+#qr{margin:16px auto;width:250px;height:250px}
+button,a.btn{display:block;width:100%;box-sizing:border-box;border:0;border-radius:12px;padding:14px;margin:10px 0;font-size:16px;text-decoration:none;cursor:pointer}
+.pay{background:#087f5b;color:#fff}.copy{background:#e9f5ef;color:#075}
+.done{background:#1769aa;color:#fff}.apps{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.apps a{background:#f0f2f4;color:#123}
+.small{font-size:13px;color:#667}.upi{font-weight:700;word-break:break-all}
+</style></head>
+<body><div class="card">
+<h1>📚 RU Notes Store</h1><div id="subject">Notes</div><div class="amount" id="amount">₹0</div>
+<div class="small">Pay securely using any UPI app</div>
+<div id="qr"></div>
+<div class="upi" id="upi"></div>
+<button class="copy" onclick="copyUpi()">📋 Copy UPI ID</button>
+<div class="apps">
+<a id="intent" class="btn pay">💳 Pay by UPI App</a>
+<a id="gpay" class="btn">Google Pay</a><a id="phonepe" class="btn">PhonePe</a><a id="paytm" class="btn">Paytm</a>
+</div>
+<button class="done" onclick="paid()">✅ मैंने Payment कर दिया</button>
+<p class="small">Payment के बाद ऊपर वाला button दबाएँ। Admin transaction देखकर approval देगा और approved होने पर PDF Telegram में भेजी जाएगी.</p>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+const p=new URLSearchParams(location.search), order=p.get('order')||'', amount=p.get('amount')||'0', upi=p.get('upi')||'', name=p.get('name')||'RU Notes Store', subject=p.get('subject')||'Notes', bot=p.get('bot')||'RajasthanUniversityNotes_bot';
+const pa='upi://pay?'+new URLSearchParams({pa:upi,pn:name,am:amount,cu:'INR',tn:'RU Notes Order '+order});
+document.getElementById('subject').textContent=subject;
+document.getElementById('amount').textContent='₹'+amount;
+document.getElementById('upi').textContent=upi;
+new QRCode(document.getElementById('qr'),{text:pa,width:250,height:250});
+document.getElementById('intent').href=pa;
+document.getElementById('gpay').href=pa; document.getElementById('phonepe').href=pa; document.getElementById('paytm').href=pa;
+function copyUpi(){navigator.clipboard&&navigator.clipboard.writeText(upi);alert('UPI ID copied');}
+function paid(){if(!order){alert('Order missing');return;} location.href='https://t.me/'+bot+'?start=paid_'+encodeURIComponent(order);}
+</script></body></html>
