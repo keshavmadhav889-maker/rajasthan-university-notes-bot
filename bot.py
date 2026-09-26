@@ -24,6 +24,7 @@ BUSINESS_NAME = os.getenv("BUSINESS_NAME", "RU Notes Store").strip()
 PAYMENT_PAGE_URL = os.getenv("PAYMENT_PAGE_URL", "https://keshavmadhav889-maker.github.io/rajasthan-university-notes-bot/payment.html").strip()
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0") or 0)
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
 DB_PATH = os.getenv("DATABASE_PATH", "bot.db")
 BUNDLE_DISCOUNT_PERCENT = max(0, min(90, int(os.getenv("BUNDLE_DISCOUNT_PERCENT", "20"))))
@@ -264,8 +265,13 @@ def admin_menu():
         [InlineKeyboardButton("📢 Broadcast",callback_data="adm:broadcast"), InlineKeyboardButton("⚙️ Settings",callback_data="adm:settings")]
     ])
 
-def admin_only(user_id):
-    return user_id == ADMIN_CHAT_ID
+def admin_only(user_id, username=""):
+    """Allow configured admin chat/user ID, optional admin user ID, or admin username."""
+    allowed_ids = {x for x in (ADMIN_CHAT_ID, ADMIN_USER_ID) if x}
+    if user_id in allowed_ids:
+        return True
+    configured = ADMIN_USERNAME.strip().lstrip("@").lower()
+    return bool(configured and username and username.lower() == configured)
 
 
 def make_payment_page_url(order_id, amount, subject, bundle=False):
@@ -384,6 +390,7 @@ async def approve_manual_order(update, context, oid):
             return
 
         await q.answer("⏳ PDF भेजी जा रही है...")
+        log.info("APPROVE CLICK admin=%s username=%s order=%s student=%s file_id=%s", q.from_user.id, q.from_user.username, oid, o["telegram_id"], bool(o["file_id"]))
 
         await context.bot.send_document(
             chat_id=int(o["telegram_id"]),
@@ -1076,10 +1083,30 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="featured": await featured_notes(q); return
     if d=="request": await request_notes(q); return
     if d=="search": await search_prompt(q,context); return
-    if d.startswith("approveorder:") and admin_only(q.from_user.id): await approve_manual_order(q,context,int(d.split(":")[1])); return
-    if d.startswith("rejectorder:") and admin_only(q.from_user.id): await reject_manual_order(q,context,int(d.split(":")[1])); return
-    if d.startswith("approvebundle:") and admin_only(q.from_user.id): await approve_manual_bundle(q,context,int(d.split(":")[1])); return
-    if d.startswith("rejectbundle:") and admin_only(q.from_user.id): await reject_manual_bundle(q,context,int(d.split(":")[1])); return
+    if d.startswith("approveorder:"):
+        if not admin_only(q.from_user.id, q.from_user.username or ""):
+            await q.answer("❌ यह button केवल Admin के लिए है।", show_alert=True)
+            return
+        await approve_manual_order(q,context,int(d.split(":")[1]))
+        return
+    if d.startswith("rejectorder:"):
+        if not admin_only(q.from_user.id, q.from_user.username or ""):
+            await q.answer("❌ यह button केवल Admin के लिए है।", show_alert=True)
+            return
+        await reject_manual_order(q,context,int(d.split(":")[1]))
+        return
+    if d.startswith("approvebundle:"):
+        if not admin_only(q.from_user.id, q.from_user.username or ""):
+            await q.answer("❌ यह button केवल Admin के लिए है।", show_alert=True)
+            return
+        await approve_manual_bundle(q,context,int(d.split(":")[1]))
+        return
+    if d.startswith("rejectbundle:"):
+        if not admin_only(q.from_user.id, q.from_user.username or ""):
+            await q.answer("❌ यह button केवल Admin के लिए है।", show_alert=True)
+            return
+        await reject_manual_bundle(q,context,int(d.split(":")[1]))
+        return
 
     if d.startswith("adducourse:") and admin_only(q.from_user.id):
         course=d.split(":")[1]
