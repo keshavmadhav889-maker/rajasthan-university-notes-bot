@@ -27,7 +27,7 @@ button,a.btn{display:block;width:100%;box-sizing:border-box;border:0;border-radi
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
-const p=new URLSearchParams(location.search), order=p.get('order')||'', amount=p.get('amount')||'0', upi=p.get('upi')||'', name=p.get('name')||'RU Notes Store', subject=p.get('subject')||'Notes', bot=p.get('bot')||'RajasthanUniversityNotes_bot';
+const p=new URLSearchParams(location.search), order=p.get('order')||'', amount=p.get('amount')||'0', upi=p.get('upi')||'madhav889@ibl', name=p.get('name')||'RU Notes Store', subject=p.get('subject')||'Notes', bot=p.get('bot')||'RajasthanUniversityNotes_bot';
 const pa='upi://pay?'+new URLSearchParams({pa:upi,pn:name,am:amount,cu:'INR',tn:'RU Notes Order '+order});
 document.getElementById('subject').textContent=subject;
 document.getElementById('amount').textContent='₹'+amount;
